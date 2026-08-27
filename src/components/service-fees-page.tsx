@@ -6,6 +6,9 @@ import { formatDisplayValue } from "@/lib/display-format";
 import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
 import { Button, Input, Panel } from "./ui";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableFilterOption, type TableSortOrder } from "./table-column-menu";
+import { useRequestGuard } from "@/lib/table-query-client";
 
 type Row = Record<string, string | number | boolean | null>;
 type ListResponse = { rows: Row[]; summary: Summary; total: number; page: number; pageSize: number; totalPages: number };
@@ -46,6 +49,7 @@ const columns: Array<{ key: string; label: string; type?: string }> = [
   { key: "createdAt", label: "创建日期", type: "date" },
   { key: "updatedAt", label: "更新日期", type: "date" },
 ];
+const tableColumns = columns.map((column) => ({ ...column, sortable: true, filterable: true }));
 
 const emptySummary: Summary = {
   billingTotal: 0,
@@ -72,10 +76,19 @@ export function ServiceFeesPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [total, setTotal] = useState(0);
+  const [sortField, setSortField] = useState("");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>("");
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
   const pageSizeRef = useRef(pageSize);
   const skipNextPageChangeRef = useRef(false);
+  const beginRequest = useRequestGuard();
 
-  const params = useMemo(() => buildParams({ keyword, startMonth, endMonth, countryCode, batchName, lineType, requestType }), [
+  const params = useMemo(() => {
+    const next = buildParams({ keyword, startMonth, endMonth, countryCode, batchName, lineType, requestType });
+    if (sortField && sortOrder) { next.set("sortField", sortField); next.set("sortOrder", sortOrder); }
+    for (const [key, values] of Object.entries(columnFilters)) values.forEach((value) => next.append(`filter.${key}`, value));
+    return next;
+  }, [
     keyword,
     startMonth,
     endMonth,
@@ -83,6 +96,9 @@ export function ServiceFeesPage() {
     batchName,
     lineType,
     requestType,
+    sortField,
+    sortOrder,
+    columnFilters,
   ]);
 
   async function fetchData(nextPage: number, nextPageSize: number, exportAll = false, includeSummary = true): Promise<ListResponse> {
@@ -101,9 +117,11 @@ export function ServiceFeesPage() {
   }
 
   async function loadData(nextPage = page, nextPageSize = pageSizeRef.current, includeSummary = true) {
+    const isCurrentRequest = beginRequest();
     setLoading(true);
     try {
       const data = await fetchData(nextPage, nextPageSize, false, includeSummary);
+      if (!isCurrentRequest()) return;
       setRows(data.rows ?? []);
       if (includeSummary) {
         setSummary(data.summary ?? emptySummary);
@@ -111,12 +129,13 @@ export function ServiceFeesPage() {
       }
       if (data.page !== nextPage) setPage(data.page);
     } catch (error) {
+      if (!isCurrentRequest()) return;
       setRows([]);
       setSummary(emptySummary);
       setTotal(0);
       alert(error instanceof Error ? error.message : "服务费数据加载失败");
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
   }
 
@@ -176,6 +195,29 @@ export function ServiceFeesPage() {
     link.download = "service-fees.csv";
     link.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function loadColumnOptions(field: string, optionKeyword: string): Promise<TableFilterOption[]> {
+    const optionParams = new URLSearchParams({ field });
+    if (optionKeyword.trim()) optionParams.set("keyword", optionKeyword.trim());
+    if (startMonth) optionParams.set("startMonth", startMonth);
+    if (endMonth) optionParams.set("endMonth", endMonth);
+    if (countryCode.trim()) optionParams.set("countryCode", countryCode.trim());
+    if (batchName.trim()) optionParams.set("batchName", batchName.trim());
+    if (lineType.trim()) optionParams.set("lineType", lineType.trim());
+    if (requestType.trim()) optionParams.set("requestType", requestType.trim());
+    for (const [key, values] of Object.entries(columnFilters)) {
+      if (key === field) continue;
+      for (const value of values) optionParams.append(`filter.${key}`, value);
+    }
+    const response = await fetch(`/api/service-fees/calculate?${optionParams}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "筛选候选值加载失败");
+    return (data.options ?? []) as TableFilterOption[];
+  }
+
+  function renderHeader(column: (typeof tableColumns)[number]) {
+    return <TableColumnMenu column={column} filterValues={columnFilters[column.key] ?? []} loadOptions={(keyword) => loadColumnOptions(column.key, keyword)} onFilter={(values) => { setColumnFilters((current) => ({ ...current, [column.key]: values })); setPage(1); }} onSort={(order) => { setSortField(order ? column.key : ""); setSortOrder(order); setPage(1); }} sortOrder={sortField === column.key ? sortOrder : ""} />;
   }
 
   return (
@@ -242,13 +284,13 @@ export function ServiceFeesPage() {
           <span className="text-sm text-[#909399]">请在上方将起始月份与结束月份选为同一个月；对账单将汇总所选国家当月的全部批次。</span>
         </div>
 
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="service-fees">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
-                {columns.map((column) => (
+                {tableColumns.map((column) => (
                   <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>
-                    {column.label}
+                    {renderHeader(column)}
                   </th>
                 ))}
               </tr>
@@ -265,14 +307,14 @@ export function ServiceFeesPage() {
               ))}
               {!rows.length ? (
                 <tr>
-                  <td className="py-12 text-center text-[#909399]" colSpan={columns.length}>
+                  <td className="py-12 text-center text-[#909399]" colSpan={tableColumns.length}>
                     {loading ? "加载中..." : "暂无服务费核算明细"}
                   </td>
                 </tr>
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar
           page={page}
           pageSize={pageSize}

@@ -2,6 +2,8 @@ export type TableColumn = {
   key: string;
   label: string;
   defaultVisible?: boolean;
+  sortable?: boolean;
+  filterable?: boolean;
 };
 
 export type ColumnVisibility = Record<string, boolean>;

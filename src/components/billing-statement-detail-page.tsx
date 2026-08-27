@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { getReturnTo } from "@/lib/client-list-navigation";
 import { formatDisplayValue } from "@/lib/display-format";
 import { Button, Panel } from "./ui";
+import { StickyTable } from "./sticky-table";
 
 type Row = Record<string, string | number | boolean | null>;
 type StatementData = { snapshot: Row | null; items: Row[] };
@@ -124,7 +125,7 @@ export function BillingStatementDetailPage({ snapshotNo }: { snapshotNo: string 
           <span className="font-medium text-[#303133]">对账单明细</span>
           <span className="text-sm text-[#909399]">共 {data.items.length} 条，金额合计 {formatValue(total, "money")}</span>
         </div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="billing-statement-detail-items">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -150,7 +151,7 @@ export function BillingStatementDetailPage({ snapshotNo }: { snapshotNo: string 
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
       </Panel>
     </div>
   );

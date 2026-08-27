@@ -6,7 +6,11 @@ import { useRouter } from "next/navigation";
 import { formatDateInputValue, formatDisplayValue } from "@/lib/display-format";
 import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
 import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
+import { fetchTableFilterOptions } from "@/lib/table-query-client";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableSortOrder } from "./table-column-menu";
+import { useRequestGuard } from "@/lib/table-query-client";
 import { Button, Input, Panel } from "./ui";
 
 type Row = {
@@ -65,6 +69,10 @@ export function PrepaymentAvailablePage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [total, setTotal] = useState(0);
   const pageSizeRef = useRef(pageSize);
+  const [sortField, setSortField] = useState("");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>("");
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
+  const beginRequest = useRequestGuard();
 
   useEffect(() => {
     const today = formatDateInputValue(new Date());
@@ -79,23 +87,53 @@ export function PrepaymentAvailablePage() {
     nextKeyword = appliedKeyword,
     nextCountryCode = appliedCountryCode,
     nextRequestType = appliedRequestType,
+    queryState = { sortField, sortOrder, columnFilters },
   ) {
+    const isCurrentRequest = beginRequest();
     setLoading(true);
-    const params = new URLSearchParams({ page: String(nextPage), pageSize: String(nextPageSize) });
-    if (nextKeyword.trim()) params.set("keyword", nextKeyword.trim());
-    if (nextCountryCode.trim()) params.set("countryCode", nextCountryCode.trim());
-    if (nextRequestType.trim()) params.set("requestType", nextRequestType.trim());
-    const response = await fetch(`/api/prepayments/available?${params}`);
-    const data = await response.json();
-    setRows(data.rows ?? []);
-    setTotal(Number(data.total ?? 0));
-    setPage(Number(data.page ?? nextPage));
-    setSelectedRowsById((current) => {
-      const next = { ...current };
-      for (const row of data.rows ?? []) if (selectedIds.includes(row.id)) next[row.id] = row;
-      return next;
-    });
-    setLoading(false);
+    try {
+      const params = new URLSearchParams({ page: String(nextPage), pageSize: String(nextPageSize) });
+      if (nextKeyword.trim()) params.set("keyword", nextKeyword.trim());
+      if (nextCountryCode.trim()) params.set("countryCode", nextCountryCode.trim());
+      if (nextRequestType.trim()) params.set("requestType", nextRequestType.trim());
+      if (queryState.sortField && queryState.sortOrder) {
+        params.set("sortField", queryState.sortField);
+        params.set("sortOrder", queryState.sortOrder);
+      }
+      for (const [field, values] of Object.entries(queryState.columnFilters)) {
+        for (const value of values) params.append(`filter.${field}`, value);
+      }
+      const response = await fetch(`/api/prepayments/available?${params}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "待生成预付款实例加载失败");
+      if (!isCurrentRequest()) return;
+      setRows(data.rows ?? []);
+      setTotal(Number(data.total ?? 0));
+      setPage(Number(data.page ?? nextPage));
+      setSelectedRowsById((current) => {
+        const next = { ...current };
+        for (const row of data.rows ?? []) if (selectedIds.includes(row.id)) next[row.id] = row;
+        return next;
+      });
+    } catch (error) {
+      if (!isCurrentRequest()) return;
+      alert(error instanceof Error ? error.message : "待生成预付款实例加载失败");
+    } finally {
+      if (isCurrentRequest()) setLoading(false);
+    }
+  }
+
+  function refreshTableQuery(next: { sortField?: string; sortOrder?: TableSortOrder; columnFilters?: Record<string, string[]> }) {
+    const queryState = {
+      sortField: next.sortField ?? sortField,
+      sortOrder: next.sortOrder ?? sortOrder,
+      columnFilters: next.columnFilters ?? columnFilters,
+    };
+    setSortField(queryState.sortField);
+    setSortOrder(queryState.sortOrder);
+    setColumnFilters(queryState.columnFilters);
+    setPage(1);
+    void loadData(1, pageSizeRef.current, appliedKeyword, appliedCountryCode, appliedRequestType, queryState);
   }
 
   useEffect(() => {
@@ -242,7 +280,7 @@ export function PrepaymentAvailablePage() {
           </div>
         </div>
 
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="prepayment-available">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -251,7 +289,14 @@ export function PrepaymentAvailablePage() {
                 </th>
                 {columns.map((column) => (
                   <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>
-                    {column.label}
+                    <TableColumnMenu
+                      column={{ key: column.key, label: column.label, sortable: true, filterable: true }}
+                      sortOrder={sortField === column.key ? sortOrder : ""}
+                      filterValues={columnFilters[column.key] ?? []}
+                      loadOptions={(keyword) => fetchTableFilterOptions("/api/prepayments/available", column.key, keyword, {}, columnFilters)}
+                      onSort={(order) => refreshTableQuery({ sortField: order ? column.key : "", sortOrder: order })}
+                      onFilter={(values) => refreshTableQuery({ columnFilters: { ...columnFilters, [column.key]: values } })}
+                    />
                   </th>
                 ))}
               </tr>
@@ -278,7 +323,7 @@ export function PrepaymentAvailablePage() {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={(next) => { setPage(next); void loadData(next, pageSizeRef.current); }} onPageSizeChange={(next) => { pageSizeRef.current = next; setPageSize(next); setPage(1); void loadData(1, next); }} />
       </Panel>
 

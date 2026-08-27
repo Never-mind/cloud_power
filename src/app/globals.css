@@ -72,3 +72,35 @@ textarea {
 .table-scroll > table > tbody > tr > td {
   min-width: 7rem;
 }
+
+.sticky-table-region {
+  position: relative;
+}
+
+/* The page owns vertical scrolling; the table body only owns horizontal scrolling. */
+.table-scroll {
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+[data-cloud-power-locked="1"] {
+  background: #ffffff;
+}
+
+.table-scroll tbody tr:hover > [data-cloud-power-locked="1"] {
+  background: #fafafa;
+}
+
+/* Keep every table's action column available while its other columns scroll. */
+[data-cloud-power-action-column="1"] {
+  position: sticky;
+  right: 0;
+  z-index: 30;
+  background: #ffffff;
+  box-shadow: -2px 0 4px rgba(0, 0, 0, 0.08);
+}
+
+thead [data-cloud-power-action-column="1"] {
+  z-index: 35;
+  background: #f5f7fa;
+}

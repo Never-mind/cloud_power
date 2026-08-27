@@ -9,6 +9,8 @@ import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
 import { buildDetailRoute, buildListRoute, getCurrentRoute, useListScrollPosition } from "@/lib/client-list-navigation";
 import { Button, Input, Panel } from "./ui";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableFilterOption, type TableSortOrder } from "./table-column-menu";
 
 type Row = Record<string, string | number | boolean | null>;
 
@@ -25,6 +27,7 @@ const columns: Array<{ key: string; label: string; type?: string }> = [
   { key: "createdAt", label: "创建时间", type: "datetime" },
   { key: "updatedAt", label: "更新时间", type: "datetime" },
 ];
+const tableColumns = columns.map((column) => ({ ...column, sortable: true, filterable: true }));
 
 export function PrepaymentWriteOffAdjustmentsPage() {
   const pathname = usePathname();
@@ -40,6 +43,9 @@ export function PrepaymentWriteOffAdjustmentsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [total, setTotal] = useState(0);
+  const [sortField, setSortField] = useState("");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>("");
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
   const pageSizeRef = useRef(pageSize);
   const currentRoute = getCurrentRoute(pathname, searchParams.toString());
 
@@ -61,6 +67,8 @@ export function PrepaymentWriteOffAdjustmentsPage() {
     params.set("pageSize", String(nextPageSize));
     params.set("status", nextStatusTab === "confirmed" ? "已确认" : "草稿");
     if (nextKeyword.trim()) params.set("keyword", nextKeyword.trim());
+    if (sortField && sortOrder) { params.set("sortField", sortField); params.set("sortOrder", sortOrder); }
+    for (const [key, values] of Object.entries(columnFilters)) values.forEach((value) => params.append(`filter.${key}`, value));
     const response = await fetch(`/api/prepayment-adjustments?${params.toString()}`);
     const data = await response.json();
     setRows(data.rows ?? []);
@@ -72,6 +80,29 @@ export function PrepaymentWriteOffAdjustmentsPage() {
   useEffect(() => {
     void loadData();
   }, []);
+
+  useEffect(() => {
+    if (!Object.keys(columnFilters).length && !sortField && !sortOrder) return;
+    void loadData(1);
+  }, [columnFilters, sortField, sortOrder]);
+
+  async function loadColumnOptions(field: string, optionKeyword: string): Promise<TableFilterOption[]> {
+    const params = new URLSearchParams({ field });
+    if (optionKeyword.trim()) params.set("keyword", optionKeyword.trim());
+    params.set("status", statusTab === "confirmed" ? "已确认" : "草稿");
+    for (const [key, values] of Object.entries(columnFilters)) {
+      if (key === field) continue;
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
+    const response = await fetch(`/api/prepayment-adjustments?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "筛选候选值加载失败");
+    return (data.options ?? []) as TableFilterOption[];
+  }
+
+  function renderHeader(column: (typeof tableColumns)[number]) {
+    return <TableColumnMenu column={column} filterValues={columnFilters[column.key] ?? []} loadOptions={(keyword) => loadColumnOptions(column.key, keyword)} onFilter={(values) => { setColumnFilters((current) => ({ ...current, [column.key]: values })); setPage(1); }} onSort={(order) => { setSortField(order ? column.key : ""); setSortOrder(order); setPage(1); }} sortOrder={sortField === column.key ? sortOrder : ""} />;
+  }
 
   async function deleteDraft(adjustmentNo: string) {
     if (!confirm("确认删除该预付款核销调整单草稿？")) return;
@@ -133,13 +164,13 @@ export function PrepaymentWriteOffAdjustmentsPage() {
           </Link>
         </div>
 
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="prepayment-writeoff-adjustments">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
-                {columns.map((column) => (
+                {tableColumns.map((column) => (
                   <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>
-                    {column.label}
+                    {renderHeader(column)}
                   </th>
                 ))}
                 <th className="sticky right-0 border-b border-[#ebeef5] bg-[#f5f7fa] px-3 py-3 text-left font-medium">操作</th>
@@ -189,7 +220,7 @@ export function PrepaymentWriteOffAdjustmentsPage() {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={(next) => { setPage(next); void loadData(next, pageSizeRef.current); }} onPageSizeChange={(next) => { pageSizeRef.current = next; setPageSize(next); setPage(1); void loadData(1, next); }} />
       </Panel>
     </div>

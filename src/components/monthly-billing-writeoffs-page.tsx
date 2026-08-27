@@ -7,6 +7,9 @@ import { FileDown, RefreshCw, Search } from "lucide-react";
 import { formatDisplayValue } from "@/lib/display-format";
 import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableFilterOption, type TableSortOrder } from "./table-column-menu";
+import { useRequestGuard } from "@/lib/table-query-client";
 import { buildDetailRoute, buildListRoute, getCurrentRoute, getPositiveNumber, useListScrollPosition } from "@/lib/client-list-navigation";
 import { Button, Input, Panel } from "./ui";
 
@@ -39,7 +42,7 @@ const displayColumns = columns.flatMap((column) =>
   column.key === "countryCode"
     ? [column, { key: "undertakingUnitCode", label: "承接单位" }, { key: "supplierCode", label: "供应商" }]
     : [column],
-);
+).map((column) => ({ ...column, sortable: true, filterable: true }));
 
 export function MonthlyBillingWriteOffsPage() {
   const pathname = usePathname();
@@ -58,8 +61,17 @@ export function MonthlyBillingWriteOffsPage() {
   const [pageSize, setPageSize] = useState(() => getPositiveNumber(searchParams.get("pageSize"), DEFAULT_PAGE_SIZE));
   const [total, setTotal] = useState(0);
   const [totalAmount, setTotalAmount] = useState(0);
+  const [sortField, setSortField] = useState(() => searchParams.get("sortField") ?? "");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>(() => {
+    const value = searchParams.get("sortOrder");
+    return value === "asc" || value === "desc" ? value : "";
+  });
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>(() =>
+    Object.fromEntries(displayColumns.map((column) => [column.key, searchParams.getAll(`filter.${column.key}`)])),
+  );
   const pageSizeRef = useRef(pageSize);
   const skipNextPageChangeRef = useRef(false);
+  const beginRequest = useRequestGuard();
   const currentRoute = getCurrentRoute(pathname, searchParams.toString());
 
   useListScrollPosition(currentRoute, !loading);
@@ -72,9 +84,15 @@ export function MonthlyBillingWriteOffsPage() {
     }
     params.set("page", String(page));
     params.set("pageSize", String(pageSize));
+    if (sortField && sortOrder) { params.set("sortField", sortField); params.set("sortOrder", sortOrder); }
+    else { params.delete("sortField"); params.delete("sortOrder"); }
+    for (const [key, values] of Object.entries(columnFilters)) {
+      params.delete(`filter.${key}`);
+      values.forEach((value) => params.append(`filter.${key}`, value));
+    }
     const nextRoute = buildListRoute(pathname, params);
     if (nextRoute !== currentRoute) router.replace(nextRoute, { scroll: false });
-  }, [appliedFilters, currentRoute, page, pageSize, pathname, router, searchParams]);
+  }, [appliedFilters, columnFilters, currentRoute, page, pageSize, pathname, router, searchParams, sortField, sortOrder]);
 
   function buildRequestParams(nextPage: number, nextPageSize: number, exportAll = false, filters = appliedFilters) {
     const params = new URLSearchParams();
@@ -86,8 +104,27 @@ export function MonthlyBillingWriteOffsPage() {
     if (filters.endMonth) params.set("endMonth", filters.endMonth);
     params.set("page", String(nextPage));
     params.set("pageSize", String(nextPageSize));
+    if (sortField && sortOrder) { params.set("sortField", sortField); params.set("sortOrder", sortOrder); }
+    for (const [key, values] of Object.entries(columnFilters)) values.forEach((value) => params.append(`filter.${key}`, value));
     if (exportAll) params.set("export", "1");
     return params;
+  }
+
+  async function loadColumnOptions(field: string, optionKeyword: string): Promise<TableFilterOption[]> {
+    const params = new URLSearchParams({ field });
+    if (optionKeyword.trim()) params.set("keyword", optionKeyword.trim());
+    for (const [key, values] of Object.entries(columnFilters)) {
+      if (key === field) continue;
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
+    const response = await fetch(`/api/billing/monthly-writeoffs?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "筛选候选值加载失败");
+    return (data.options ?? []) as TableFilterOption[];
+  }
+
+  function renderHeader(column: (typeof displayColumns)[number]) {
+    return <TableColumnMenu column={column} filterValues={columnFilters[column.key] ?? []} loadOptions={(keyword) => loadColumnOptions(column.key, keyword)} onFilter={(values) => { setColumnFilters((current) => ({ ...current, [column.key]: values })); setPage(1); }} onSort={(order) => { setSortField(order ? column.key : ""); setSortOrder(order); setPage(1); }} sortOrder={sortField === column.key ? sortOrder : ""} />;
   }
 
   async function fetchData(nextPage: number, nextPageSize: number, exportAll = false, filters = appliedFilters): Promise<ListResponse> {
@@ -98,20 +135,23 @@ export function MonthlyBillingWriteOffsPage() {
   }
 
   async function loadData(nextPage = page, nextPageSize = pageSizeRef.current, filters = appliedFilters) {
+    const isCurrentRequest = beginRequest();
     setLoading(true);
     try {
       const data = await fetchData(nextPage, nextPageSize, false, filters);
+      if (!isCurrentRequest()) return;
       setRows(data.rows ?? []);
       setTotal(Number(data.total ?? 0));
       setTotalAmount(Number(data.totalAmount ?? 0));
       if (data.page !== nextPage) setPage(data.page);
     } catch (error) {
+      if (!isCurrentRequest()) return;
       setRows([]);
       setTotal(0);
       setTotalAmount(0);
       alert(error instanceof Error ? error.message : "月账单明细加载失败");
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
   }
 
@@ -175,13 +215,13 @@ export function MonthlyBillingWriteOffsPage() {
         <div className="border-b border-[#ebeef5] bg-[#fafafa] px-4 py-3 text-sm text-[#606266]">
           当前筛选共 {total} 条，月账单核销总金额合计 {formatValue(totalAmount, "money")}
         </div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="monthly-billing-writeoffs">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
                 {displayColumns.map((column) => (
                   <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>
-                    {column.label}
+                    {renderHeader(column)}
                   </th>
                 ))}
               </tr>
@@ -205,7 +245,7 @@ export function MonthlyBillingWriteOffsPage() {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar
           page={page}
           pageSize={pageSize}

@@ -11,6 +11,7 @@ import {
 } from "@/lib/prepayment-adjustment-workflow";
 import { Button, Input, Panel, Textarea } from "./ui";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
 import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
 
 type Row = Record<string, string | number | boolean | null>;
@@ -354,7 +355,7 @@ function AdjustmentTable({
   onRemove: (id: string) => void;
 }) {
   return (
-    <div className="table-scroll overflow-auto">
+    <StickyTable className="table-scroll overflow-auto" tableKey="prepayment-writeoff-adjustment-detail-selected">
       <table className="min-w-full border-collapse text-sm">
         <thead className="bg-[#f5f7fa] text-[#303133]">
           <tr>
@@ -404,13 +405,13 @@ function AdjustmentTable({
           ) : null}
         </tbody>
       </table>
-    </div>
+    </StickyTable>
   );
 }
 
 function ConfirmedTable({ rows }: { rows: Row[] }) {
   return (
-    <div className="table-scroll overflow-auto">
+    <StickyTable className="table-scroll overflow-auto" tableKey="prepayment-writeoff-adjustment-detail-confirmed">
       <table className="min-w-full border-collapse text-sm">
         <thead className="bg-[#f5f7fa] text-[#303133]">
           <tr>
@@ -440,7 +441,7 @@ function ConfirmedTable({ rows }: { rows: Row[] }) {
           ) : null}
         </tbody>
       </table>
-    </div>
+    </StickyTable>
   );
 }
 

@@ -10,6 +10,7 @@ import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
 import { getReturnTo } from "@/lib/client-list-navigation";
 import { postWorkspaceMessage } from "@/lib/tab-workspace";
 import { Button, Input, Panel, Textarea } from "./ui";
+import { StickyTable } from "./sticky-table";
 import { WorkspaceNavigationDialog } from "./workspace-navigation-dialog";
 
 type Contract = {
@@ -331,7 +332,7 @@ export function PrepaymentContractDetailPage({ contractNo }: { contractNo: strin
 
       <Panel>
         <div className="border-b border-[#ebeef5] px-4 py-3 font-medium text-[#303133]">实例明细</div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey={`prepayment-contract-${contractNo}-instances`}>
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -372,7 +373,7 @@ export function PrepaymentContractDetailPage({ contractNo }: { contractNo: strin
               ))}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
       </Panel>
 
       <Panel>
@@ -383,7 +384,7 @@ export function PrepaymentContractDetailPage({ contractNo }: { contractNo: strin
             新增费用明细
           </Button>
         </div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey={`prepayment-contract-${contractNo}-fees`}>
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -476,7 +477,7 @@ export function PrepaymentContractDetailPage({ contractNo }: { contractNo: strin
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
       </Panel>
       {navigationPrompt ? (
         <WorkspaceNavigationDialog

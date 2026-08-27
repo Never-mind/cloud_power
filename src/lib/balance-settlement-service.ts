@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { execute, queryRows, type Row } from "./db";
 import { attachPartyCodes } from "./party-display";
 import { calculateNonInstanceLine, validateNonInstanceLine } from "./non-instance-settlement-import";
+import { appendTableInFilter, formatTableDateExpression, getTableSort, listSqlFilterOptions } from "./table-query";
 
 const DRAFT = "\u8349\u7a3f";
 const CONFIRMED = "\u5df2\u786e\u8ba4";
@@ -243,6 +244,7 @@ export async function listInstanceSettlementCandidates({
   page = 1,
   pageSize = 20,
   purchaseOrderItemIds = [],
+  searchParams,
 }: {
   countryCode?: string;
   pricingVersionId?: string;
@@ -250,12 +252,13 @@ export async function listInstanceSettlementCandidates({
   page?: number;
   pageSize?: number;
   purchaseOrderItemIds?: string[];
+  searchParams?: URLSearchParams;
 }) {
   const version = pricingVersionId ? await findPricingVersion(pricingVersionId) : undefined;
   if (pricingVersionId && !version) throw new Error("\u951a\u5b9a\u4ef7\u683c\u7248\u672c\u4e0d\u5b58\u5728\u6216\u5c1a\u672a\u786e\u8ba4");
   const appliedCountryCode = text(version?.countryCode) || text(countryCode);
   const conditions = ["po.status = :purchaseStatus", "(req.requestType IS NULL OR req.requestType <> :spareType)"];
-  const params: Row = { purchaseStatus: CONFIRMED, spareType: SPARE_PART };
+  const params: Row = { purchaseStatus: CONFIRMED, spareType: SPARE_PART, pricingVersionId: text(pricingVersionId) };
 
   if (appliedCountryCode) {
     conditions.push("req.countryCode = :countryCode");
@@ -283,6 +286,12 @@ export async function listInstanceSettlementCandidates({
     conditions.push("poi.id IN (:purchaseOrderItemIds)");
     params.purchaseOrderItemIds = selectedIds;
   }
+  const filterExpressions: Record<string, string> = {
+    countryCode: "req.countryCode", batchName: "req.batchName", requestNo: "COALESCE(poi.requestNo, ri.requestNo)", poNo: "poi.poNo",
+    deviceCode: "ri.deviceCode", modelCode: "im.modelCode", nameEn: "im.nameEn", undertakingUnitCode: "undertaking.undertakingUnitCode", supplierCode: "supplier.supplierCode", customerCode: "customer.customerCode", quantity: "ri.quantity", procurementCurrency: "po.currency",
+    capexUnitPrice: "poi.capexUnitPrice", opexUnitPrice: "poi.opexUnitPrice", anchorCapexUnitPrice: "anchor.capexAnchorUsd", anchorOpexUnitPrice: "anchor.opexAnchorUsd",
+  };
+  if (searchParams) for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(conditions, params, expression, field, searchParams, "balanceCandidate");
 
   const from = `
     FROM purchaseorderitems poi
@@ -291,6 +300,10 @@ export async function listInstanceSettlementCandidates({
     LEFT JOIN requestitems ri ON ri.id = poi.requestItemId
     LEFT JOIN requests req ON req.requestNo = COALESCE(poi.requestNo, ri.requestNo, po.requestNo)
     LEFT JOIN instancemodels im ON im.deviceCode = ri.deviceCode
+    LEFT JOIN suppliers supplier ON supplier.supplierId = ri.supplierId
+    LEFT JOIN undertakingunits undertaking ON undertaking.undertakingUnitId = ri.undertakingUnitId
+    LEFT JOIN customers customer ON customer.customerId = ri.customerId
+    LEFT JOIN capexpricingitems anchor ON anchor.versionId = :pricingVersionId AND anchor.deviceCode = ri.deviceCode
     LEFT JOIN (
       SELECT purchaseOrderItemId, MAX(deliveredAt) AS receiptDate
       FROM shipments
@@ -323,7 +336,7 @@ export async function listInstanceSettlementCandidates({
         im.modelCode, im.nameEn,
         shipment.receiptDate
       ${from}
-      ORDER BY req.batchName DESC, po.createdAt DESC, poi.id
+      ${searchParams ? (getTableSort(searchParams, filterExpressions) || "ORDER BY req.batchName DESC, po.createdAt DESC, poi.id") : "ORDER BY req.batchName DESC, po.createdAt DESC, poi.id"}
       LIMIT :limit OFFSET :offset
     `,
     { ...params, limit: safePageSize, offset: (safePage - 1) * safePageSize },
@@ -340,6 +353,36 @@ export async function listInstanceSettlementCandidates({
     totalPages,
     version: version ?? null,
   };
+}
+
+export async function listInstanceSettlementCandidateFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    countryCode: "req.countryCode", batchName: "req.batchName", requestNo: "COALESCE(poi.requestNo, ri.requestNo)", poNo: "poi.poNo",
+    deviceCode: "ri.deviceCode", modelCode: "im.modelCode", nameEn: "im.nameEn", undertakingUnitCode: "undertaking.undertakingUnitCode", supplierCode: "supplier.supplierCode", customerCode: "customer.customerCode", quantity: "ri.quantity", procurementCurrency: "po.currency",
+    capexUnitPrice: "poi.capexUnitPrice", opexUnitPrice: "poi.opexUnitPrice", anchorCapexUnitPrice: "anchor.capexAnchorUsd", anchorOpexUnitPrice: "anchor.opexAnchorUsd",
+  };
+  const pricingVersionId = text(searchParams.get("pricingVersionId"));
+  const selectedCountry = text(searchParams.get("countryCode"));
+  const conditions = [
+    "po.status = :purchaseStatus", "(req.requestType IS NULL OR req.requestType <> :spareType)",
+    "NOT EXISTS (SELECT 1 FROM balancesettlementitems existingItem INNER JOIN balancesettlements existingSettlement ON existingSettlement.settlementNo = existingItem.settlementNo WHERE existingItem.purchaseOrderItemId = poi.id AND existingItem.itemType = :instanceType AND existingSettlement.status <> :voidedStatus)",
+  ];
+  if (selectedCountry) conditions.push("req.countryCode = :candidateCountry");
+  return listSqlFilterOptions({
+    expressions,
+    searchParams,
+    from: `purchaseorderitems poi
+      INNER JOIN purchaseorders po ON po.purchaseOrderId = poi.purchaseOrderId OR ((poi.purchaseOrderId IS NULL OR poi.purchaseOrderId = '') AND po.poNo = poi.poNo)
+      LEFT JOIN requestitems ri ON ri.id = poi.requestItemId
+      LEFT JOIN requests req ON req.requestNo = COALESCE(poi.requestNo, ri.requestNo, po.requestNo)
+      LEFT JOIN instancemodels im ON im.deviceCode = ri.deviceCode
+      LEFT JOIN suppliers supplier ON supplier.supplierId = ri.supplierId
+      LEFT JOIN undertakingunits undertaking ON undertaking.undertakingUnitId = ri.undertakingUnitId
+      LEFT JOIN customers customer ON customer.customerId = ri.customerId
+      LEFT JOIN capexpricingitems anchor ON anchor.versionId = :pricingVersionId AND anchor.deviceCode = ri.deviceCode`,
+    conditions,
+    params: { purchaseStatus: CONFIRMED, spareType: SPARE_PART, instanceType: INSTANCE, voidedStatus: VOIDED, pricingVersionId, ...(selectedCountry ? { candidateCountry: selectedCountry } : {}) },
+  });
 }
 
 export async function createInstanceSettlementDraft({
@@ -457,12 +500,14 @@ export async function listBalanceSettlements({
   keyword = "",
   page = 1,
   pageSize = 20,
+  searchParams,
 }: {
   countryCode?: string;
   status?: string;
   keyword?: string;
   page?: number;
   pageSize?: number;
+  searchParams?: URLSearchParams;
 }) {
   const conditions: string[] = [];
   const params: Row = {};
@@ -472,6 +517,12 @@ export async function listBalanceSettlements({
     conditions.push("(settlementNo LIKE :keyword OR title LIKE :keyword OR pricingVersionNo LIKE :keyword)");
     params.keyword = `%${keyword.trim()}%`;
   }
+  const filterExpressions: Record<string, string> = {
+    settlementNo: "settlement.settlementNo", title: "settlement.title", itemTypes: "(SELECT GROUP_CONCAT(DISTINCT itemType ORDER BY itemType SEPARATOR ', ') FROM balancesettlementitems itemFilter WHERE itemFilter.settlementNo = settlement.settlementNo)",
+    countryCode: "settlement.countryCode", pricingVersionNo: "settlement.pricingVersionNo", currency: "settlement.currency", status: "settlement.status", itemCount: "settlement.itemCount",
+    capexDifferenceTotal: "settlement.capexDifferenceTotal", opexDifferenceTotal: "settlement.opexDifferenceTotal", differenceTotal: "settlement.differenceTotal", confirmedAt: formatTableDateExpression("settlement.confirmedAt"), createdAt: formatTableDateExpression("settlement.createdAt"), updatedAt: formatTableDateExpression("settlement.updatedAt"),
+  };
+  if (searchParams) for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(conditions, params, expression, field, searchParams, "balanceSettlement");
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const [{ total: totalValue }] = await queryRows<{ total: number }>(
     `SELECT COUNT(*) AS total FROM balancesettlements settlement ${where}`,
@@ -491,12 +542,20 @@ export async function listBalanceSettlements({
              ) AS itemTypes
       FROM balancesettlements settlement
       ${where}
-      ORDER BY settlement.createdAt DESC
+      ${searchParams ? (getTableSort(searchParams, filterExpressions) || "ORDER BY settlement.createdAt DESC") : "ORDER BY settlement.createdAt DESC"}
       LIMIT :limit OFFSET :offset
     `,
     { ...params, limit: safePageSize, offset: (safePage - 1) * safePageSize },
   );
   return { rows, total, page: safePage, pageSize: safePageSize, totalPages };
+}
+
+export async function listBalanceSettlementFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    settlementNo: "settlementNo", title: "title", countryCode: "countryCode", pricingVersionNo: "pricingVersionNo", currency: "currency", status: "status", itemCount: "itemCount",
+    capexDifferenceTotal: "capexDifferenceTotal", opexDifferenceTotal: "opexDifferenceTotal", differenceTotal: "differenceTotal", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  return listSqlFilterOptions({ from: "balancesettlements", expressions, searchParams });
 }
 
 export async function getBalanceSettlement(settlementNo: string) {

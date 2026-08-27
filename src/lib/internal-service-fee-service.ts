@@ -1,6 +1,7 @@
 import { execute, queryRows, type Row } from "./db";
 import { attachPartyCodes } from "./party-display";
 import { DEFAULT_PAGE_SIZE, normalizePageSize } from "./pagination";
+import { appendTableFilterOptionConditions, appendTableInFilter, formatTableDateExpression, getTableFilterOptionsOrderBy, getTableSort, listSqlFilterOptions } from "./table-query";
 import {
   buildInternalServiceFeeSchedule,
   firstDayOfMonth,
@@ -46,9 +47,21 @@ export async function listAvailableInternalServiceLedgers(searchParams: URLSearc
   const keyword = searchParams.get("keyword")?.trim();
   const requestedPage = Math.max(1, Math.floor(Number(searchParams.get("page") ?? 1) || 1));
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
-  const where = keyword
-    ? "WHERE (billing.requestNo LIKE :keyword OR billing.poNo LIKE :keyword OR billing.deviceCode LIKE :keyword OR billing.batchName LIKE :keyword)"
-    : "";
+  const conditions = ["internal.ledgerId IS NULL"];
+  const params: Row = {};
+  if (keyword) {
+    conditions.push("(billing.requestNo LIKE :keyword OR billing.poNo LIKE :keyword OR billing.deviceCode LIKE :keyword OR billing.batchName LIKE :keyword)");
+    params.keyword = `%${keyword}%`;
+  }
+  const filterExpressions: Record<string, string> = {
+    countryCode: "billing.countryCode", batchName: "billing.batchName", requestNo: "billing.requestNo", poNo: "billing.poNo",
+    deviceCode: "billing.deviceCode", modelCode: "billing.modelCode", nameEn: "billing.nameEn", quantity: "billing.quantity", currency: "billing.contractCurrency",
+    revenueExcludingTax: "monthly.revenueIncludingTax", procurementCost: "COALESCE(purchaseItem.taxExcludedUnitPrice, billing.taxExcludedUnitPrice, 0)",
+    expectedInternalServiceFee: "monthly.revenueIncludingTax - COALESCE(billing.quantity, 0) * (COALESCE(purchaseItem.taxExcludedUnitPrice, billing.taxExcludedUnitPrice, 0) + COALESCE(purchaseItem.taxSurcharge, billing.taxSurcharge, 0))",
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(conditions, params, expression, field, searchParams, "internalAvailable");
+  const where = `WHERE ${conditions.join(" AND ")}`;
+  const requestedSort = getTableSort(searchParams, filterExpressions);
   const sourceFrom = `
       FROM billinginstanceledgers billing
       LEFT JOIN internalserviceledgers internal ON internal.ledgerId = billing.ledgerId
@@ -60,9 +73,8 @@ export async function listAvailableInternalServiceLedgers(searchParams: URLSearc
         SELECT ledgerId, SUM(COALESCE(monthlyTotalAmount, 0)) AS revenueIncludingTax
         FROM monthlybillingwriteoffs GROUP BY ledgerId
       ) monthly ON monthly.ledgerId = billing.ledgerId
-      ${where.replace("WHERE", "WHERE internal.ledgerId IS NULL AND") || "WHERE internal.ledgerId IS NULL"}
+      ${where}
   `;
-  const params = keyword ? { keyword: `%${keyword}%` } : {};
   const [{ total: totalValue }] = await queryRows<{ total: number }>(`SELECT COUNT(*) AS total ${sourceFrom}`, params);
   const total = Number(totalValue ?? 0);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -81,7 +93,7 @@ export async function listAvailableInternalServiceLedgers(searchParams: URLSearc
         ROUND(COALESCE(billing.quantity, 0) * (COALESCE(purchaseItem.taxExcludedUnitPrice, billing.taxExcludedUnitPrice, 0) + COALESCE(purchaseItem.taxSurcharge, billing.taxSurcharge, 0)), 2) AS procurementCost,
         ROUND(COALESCE(monthly.revenueIncludingTax, 0) / (1 + COALESCE(country.vatRate, billing.vatRate, 0)) - COALESCE(billing.quantity, 0) * (COALESCE(purchaseItem.taxExcludedUnitPrice, billing.taxExcludedUnitPrice, 0) + COALESCE(purchaseItem.taxSurcharge, billing.taxSurcharge, 0)), 2) AS expectedInternalServiceFee
       ${sourceFrom}
-      ORDER BY billing.createdAt DESC
+      ${requestedSort || "ORDER BY billing.createdAt DESC"}
       LIMIT :limit OFFSET :offset
     `,
     { ...params, limit: pageSize, offset: (page - 1) * pageSize },
@@ -89,12 +101,43 @@ export async function listAvailableInternalServiceLedgers(searchParams: URLSearc
   return { rows: await attachPartyCodes(rows), total, page, pageSize, totalPages };
 }
 
+export async function listAvailableInternalServiceFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    countryCode: "billing.countryCode", batchName: "billing.batchName", requestNo: "billing.requestNo", poNo: "billing.poNo",
+    deviceCode: "billing.deviceCode", modelCode: "billing.modelCode", nameEn: "billing.nameEn", quantity: "billing.quantity", currency: "billing.contractCurrency",
+    revenueExcludingTax: "monthly.revenueIncludingTax", procurementCost: "COALESCE(purchaseItem.taxExcludedUnitPrice, billing.taxExcludedUnitPrice, 0)",
+    expectedInternalServiceFee: "monthly.revenueIncludingTax - COALESCE(billing.quantity, 0) * (COALESCE(purchaseItem.taxExcludedUnitPrice, billing.taxExcludedUnitPrice, 0) + COALESCE(purchaseItem.taxSurcharge, billing.taxSurcharge, 0))",
+  };
+  return listSqlFilterOptions({
+    expressions,
+    searchParams,
+    from: `billinginstanceledgers billing
+      LEFT JOIN internalserviceledgers internal ON internal.ledgerId = billing.ledgerId
+      LEFT JOIN purchaseorderitems purchaseItem ON purchaseItem.id = billing.purchaseOrderItemId
+      LEFT JOIN (
+        SELECT ledgerId, SUM(COALESCE(monthlyTotalAmount, 0)) AS revenueIncludingTax
+        FROM monthlybillingwriteoffs GROUP BY ledgerId
+      ) monthly ON monthly.ledgerId = billing.ledgerId`,
+    conditions: ["internal.ledgerId IS NULL"],
+  });
+}
+
 export async function listInternalServiceAdjustments(searchParams: URLSearchParams) {
   const keyword = searchParams.get("keyword")?.trim();
   const requestedPage = Math.max(1, Math.floor(Number(searchParams.get("page") ?? 1) || 1));
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
-  const where = keyword ? "WHERE adjustmentNo LIKE :keyword OR requestNo LIKE :keyword OR poNo LIKE :keyword OR deviceCode LIKE :keyword" : "";
-  const params = keyword ? { keyword: `%${keyword}%` } : {};
+  const conditions: string[] = [];
+  const params: Row = {};
+  if (keyword) {
+    conditions.push("(adjustmentNo LIKE :keyword OR requestNo LIKE :keyword OR poNo LIKE :keyword OR deviceCode LIKE :keyword)");
+    params.keyword = `%${keyword}%`;
+  }
+  const filterExpressions: Record<string, string> = {
+    adjustmentNo: "adjustmentNo", countryCode: "countryCode", batchName: "batchName", requestNo: "requestNo", poNo: "poNo", deviceCode: "deviceCode",
+    startMonth: formatTableDateExpression("startMonth"), endMonth: formatTableDateExpression("endMonth"), monthlyAmount: "monthlyAmount", reason: "reason", status: "status", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(conditions, params, expression, field, searchParams, "internalAdjustment");
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const [{ total: totalValue }] = await queryRows<{ total: number }>(`SELECT COUNT(*) AS total FROM internalservicefeeadjustments ${where}`, params);
   const total = Number(totalValue ?? 0);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -109,12 +152,20 @@ export async function listInternalServiceAdjustments(searchParams: URLSearchPara
         DATE_FORMAT(updatedAt, '%Y-%m-%d') AS updatedAt
       FROM internalservicefeeadjustments
       ${where}
-      ORDER BY confirmedAt DESC, adjustmentNo DESC
+      ${getTableSort(searchParams, filterExpressions) || "ORDER BY confirmedAt DESC, adjustmentNo DESC"}
       LIMIT :limit OFFSET :offset
     `,
     { ...params, limit: pageSize, offset: (page - 1) * pageSize },
   );
   return { rows: await attachPartyCodes(rows), total, page, pageSize, totalPages };
+}
+
+export async function listInternalServiceAdjustmentFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    adjustmentNo: "adjustmentNo", countryCode: "countryCode", batchName: "batchName", requestNo: "requestNo", poNo: "poNo", deviceCode: "deviceCode",
+    startMonth: formatTableDateExpression("startMonth"), endMonth: formatTableDateExpression("endMonth"), monthlyAmount: "monthlyAmount", reason: "reason", status: "status", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  return listSqlFilterOptions({ from: "internalservicefeeadjustments", expressions, searchParams });
 }
 
 export async function listInternalServiceSnapshots(searchParams: URLSearchParams) {
@@ -123,7 +174,17 @@ export async function listInternalServiceSnapshots(searchParams: URLSearchParams
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
   const requestedItemPage = Math.max(1, Math.floor(Number(searchParams.get("itemPage") ?? 1) || 1));
   const itemPageSize = normalizePageSize(Number(searchParams.get("itemPageSize") ?? DEFAULT_PAGE_SIZE));
-  const [{ total: totalValue }] = await queryRows<{ total: number }>("SELECT COUNT(*) AS total FROM internalservicefeesnapshots");
+  const snapshotExpressions: Record<string, string> = {
+    snapshotNo: "snapshotNo", archiveMonth: formatTableDateExpression("archiveMonth"), countryCode: "countryCode", itemCount: "itemCount", totalAmount: "totalAmount", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  const snapshotConditions: string[] = [];
+  const params: Row = {};
+  const snapshotSearchParams = new URLSearchParams(searchParams);
+  if (searchParams.get("snapshotSortField")) snapshotSearchParams.set("sortField", searchParams.get("snapshotSortField") ?? "");
+  if (searchParams.get("snapshotSortOrder")) snapshotSearchParams.set("sortOrder", searchParams.get("snapshotSortOrder") ?? "");
+  for (const [field, expression] of Object.entries(snapshotExpressions)) appendTableInFilter(snapshotConditions, params, expression, field, searchParams, "internalSnapshot");
+  const snapshotWhere = snapshotConditions.length ? `WHERE ${snapshotConditions.join(" AND ")}` : "";
+  const [{ total: totalValue }] = await queryRows<{ total: number }>(`SELECT COUNT(*) AS total FROM internalservicefeesnapshots ${snapshotWhere}`, params);
   const total = Number(totalValue ?? 0);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(requestedPage, totalPages);
@@ -132,21 +193,47 @@ export async function listInternalServiceSnapshots(searchParams: URLSearchParams
        DATE_FORMAT(confirmedAt, '%Y-%m-%d') AS confirmedAt,
        DATE_FORMAT(createdAt, '%Y-%m-%d') AS createdAt,
        DATE_FORMAT(updatedAt, '%Y-%m-%d') AS updatedAt
-       FROM internalservicefeesnapshots ORDER BY archiveMonth DESC, snapshotNo DESC LIMIT :limit OFFSET :offset`,
-    { limit: pageSize, offset: (page - 1) * pageSize },
+       FROM internalservicefeesnapshots ${snapshotWhere} ${getTableSort(snapshotSearchParams, snapshotExpressions) || "ORDER BY archiveMonth DESC, snapshotNo DESC"} LIMIT :limit OFFSET :offset`,
+    { ...params, limit: pageSize, offset: (page - 1) * pageSize },
   );
-  const [{ total: itemTotalValue }] = snapshotNo ? await queryRows<{ total: number }>("SELECT COUNT(*) AS total FROM internalservicefeesnapshotitems WHERE snapshotNo = :snapshotNo", { snapshotNo }) : [{ total: 0 }];
+  const itemExpressions: Record<string, string> = {
+    writeOffMonth: formatTableDateExpression("writeOffMonth"), countryCode: "countryCode", batchName: "batchName", requestNo: "requestNo", poNo: "poNo", deviceCode: "deviceCode", currency: "currency", internalServiceFeeAmount: "internalServiceFeeAmount", sourceType: "sourceType", adjustmentNo: "adjustmentNo", createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  const itemConditions: string[] = [];
+  const itemParams: Row = {};
+  if (snapshotNo) { itemConditions.push("snapshotNo = :snapshotNo"); itemParams.snapshotNo = snapshotNo; }
+  for (const [field, expression] of Object.entries(itemExpressions)) appendTableInFilter(itemConditions, itemParams, expression, field, searchParams, "internalSnapshotItem", "itemFilter");
+  const itemWhere = itemConditions.length ? `WHERE ${itemConditions.join(" AND ")}` : "WHERE 1 = 0";
+  const [{ total: itemTotalValue }] = snapshotNo ? await queryRows<{ total: number }>(`SELECT COUNT(*) AS total FROM internalservicefeesnapshotitems ${itemWhere}`, itemParams) : [{ total: 0 }];
   const itemTotal = Number(itemTotalValue ?? 0);
   const itemTotalPages = Math.max(1, Math.ceil(itemTotal / itemPageSize));
   const itemPage = Math.min(requestedItemPage, itemTotalPages);
   const items = snapshotNo ? await queryRows<Row>(
-    `SELECT *, DATE_FORMAT(writeOffMonth, '%Y-%m-%d') AS writeOffMonth,
+    `SELECT id, snapshotNo, monthlyFeeId, ledgerId,
+       DATE_FORMAT(writeOffMonth, '%Y-%m-%d') AS writeOffMonth,
+       countryCode, batchName, requestNo, poNo, deviceCode, supplierId, undertakingUnitId, customerId,
+       currency, internalServiceFeeAmount, sourceType, adjustmentNo,
        DATE_FORMAT(createdAt, '%Y-%m-%d') AS createdAt,
        DATE_FORMAT(updatedAt, '%Y-%m-%d') AS updatedAt
-       FROM internalservicefeesnapshotitems WHERE snapshotNo = :snapshotNo ORDER BY id LIMIT :limit OFFSET :offset`,
-    { snapshotNo, limit: itemPageSize, offset: (itemPage - 1) * itemPageSize },
+       FROM internalservicefeesnapshotitems ${itemWhere} ${getTableSort(searchParams, itemExpressions) || "ORDER BY id"} LIMIT :limit OFFSET :offset`,
+    { ...itemParams, limit: itemPageSize, offset: (itemPage - 1) * itemPageSize },
   ) : [];
   return { snapshots, items: await attachPartyCodes(items), total, page, pageSize, totalPages, itemTotal, itemPage, itemPageSize, itemTotalPages };
+}
+
+export async function listInternalServiceSnapshotFilterOptions(searchParams: URLSearchParams) {
+  const itemScope = searchParams.get("scope") === "items";
+  if (itemScope) {
+    const expressions: Record<string, string> = {
+      writeOffMonth: formatTableDateExpression("writeOffMonth"), countryCode: "countryCode", batchName: "batchName", requestNo: "requestNo", poNo: "poNo", deviceCode: "deviceCode", currency: "currency", internalServiceFeeAmount: "internalServiceFeeAmount", sourceType: "sourceType", adjustmentNo: "adjustmentNo", createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+    };
+    const snapshotNo = searchParams.get("snapshotNo")?.trim() ?? "";
+    return listSqlFilterOptions({ from: "internalservicefeesnapshotitems", expressions, searchParams, queryPrefix: "itemFilter", conditions: snapshotNo ? ["snapshotNo = :snapshotNo"] : ["1 = 0"], params: snapshotNo ? { snapshotNo } : {} });
+  }
+  const expressions: Record<string, string> = {
+    snapshotNo: "snapshotNo", archiveMonth: "archiveMonth", countryCode: "countryCode", itemCount: "itemCount", totalAmount: "totalAmount", confirmedAt: "confirmedAt", createdAt: "createdAt", updatedAt: "updatedAt",
+  };
+  return listSqlFilterOptions({ from: "internalservicefeesnapshots", expressions, searchParams });
 }
 
 export async function regenerateInternalServiceLedger(ledgerId: string) {
@@ -252,6 +339,12 @@ export async function listInternalServiceFees(searchParams: URLSearchParams) {
   const exportAll = searchParams.get("export") === "1";
   const requestedPage = Math.max(1, Math.floor(Number(searchParams.get("page") ?? 1) || 1));
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
+  const filterExpressions: Record<string, string> = {
+    writeOffMonth: "fee.writeOffMonth", countryCode: "fee.countryCode", batchName: "fee.batchName", requestNo: "fee.requestNo", poNo: "fee.poNo",
+    deviceCode: "fee.deviceCode", modelCode: "fee.modelCode", nameEn: "fee.nameEn", quantity: "fee.quantity", currency: "fee.currency",
+    internalServiceFeeAmount: "fee.internalServiceFeeAmount", sourceType: "fee.sourceType", adjustmentNo: "fee.adjustmentNo", archived: "fee.archived",
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(where, params, expression, field, searchParams, "internalServiceFee");
   if (keyword) {
     where.push("(fee.ledgerId LIKE :keyword OR fee.requestNo LIKE :keyword OR fee.poNo LIKE :keyword OR fee.deviceCode LIKE :keyword OR fee.nameEn LIKE :keyword)");
     params.keyword = `%${keyword}%`;
@@ -278,10 +371,16 @@ export async function listInternalServiceFees(searchParams: URLSearchParams) {
   }
   const rows = await queryRows<Row>(
     `
-      SELECT fee.*, DATE_FORMAT(fee.writeOffMonth, '%Y-%m-%d') AS writeOffMonth
+      SELECT fee.id, fee.ledgerId, DATE_FORMAT(fee.writeOffMonth, '%Y-%m-%d') AS writeOffMonth,
+        fee.monthIndex, fee.countryCode, fee.batchName, fee.requestNo, fee.poNo, fee.deviceCode,
+        fee.modelCode, fee.nameEn, fee.supplierId, fee.undertakingUnitId, fee.customerId,
+        fee.quantity, fee.currency, fee.internalServiceFeeAmount, fee.sourceType, fee.adjustmentNo,
+        fee.archived, fee.archiveSnapshotNo, DATE_FORMAT(fee.archivedAt, '%Y-%m-%d') AS archivedAt,
+        DATE_FORMAT(fee.createdAt, '%Y-%m-%d') AS createdAt,
+        DATE_FORMAT(fee.updatedAt, '%Y-%m-%d') AS updatedAt
       FROM monthlyinternalservicefees fee
       ${whereSql}
-      ORDER BY fee.writeOffMonth DESC, fee.ledgerId
+      ${getTableSort(searchParams, filterExpressions) || "ORDER BY fee.writeOffMonth DESC, fee.ledgerId"}
       ${exportAll ? "" : "LIMIT :limit OFFSET :offset"}
     `,
     params,
@@ -294,6 +393,24 @@ export async function listInternalServiceFees(searchParams: URLSearchParams) {
     pageSize,
     totalPages,
   };
+}
+
+export async function listInternalServiceFeeFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    writeOffMonth: formatTableDateExpression("writeOffMonth"), countryCode: "countryCode", batchName: "batchName", requestNo: "requestNo", poNo: "poNo", deviceCode: "deviceCode",
+    modelCode: "modelCode", nameEn: "nameEn", quantity: "quantity", currency: "currency", internalServiceFeeAmount: "internalServiceFeeAmount",
+    sourceType: "sourceType", adjustmentNo: "adjustmentNo", archived: "archived",
+  };
+  const field = searchParams.get("field")?.trim() ?? "";
+  const expression = expressions[field];
+  if (!expression) return { options: [] as Array<{ value: string; count: number }> };
+  const params: Row = {};
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  const where = [`${expression} IS NOT NULL`, `TRIM(CAST(${expression} AS CHAR)) <> ''`];
+  if (keyword) { where.push(`${expression} LIKE :optionKeyword`); params.optionKeyword = `%${keyword}%`; }
+  appendTableFilterOptionConditions(where, params, expressions, searchParams, field);
+  const rows = await queryRows<{ value: string; count: number }>(`SELECT ${expression} AS value, COUNT(*) AS count FROM monthlyinternalservicefees WHERE ${where.join(" AND ")} GROUP BY ${expression} ORDER BY ${getTableFilterOptionsOrderBy(field, expression)} LIMIT 500`, params);
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
 }
 
 export async function saveInternalServiceAdjustment(input: {

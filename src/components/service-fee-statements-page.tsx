@@ -8,6 +8,9 @@ import { formatDisplayValue } from "@/lib/display-format";
 import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
 import { postWorkspaceMessage } from "@/lib/tab-workspace";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableFilterOption, type TableSortOrder } from "./table-column-menu";
+import { useRequestGuard } from "@/lib/table-query-client";
 import { Button, Input, Panel } from "./ui";
 
 type Row = Record<string, string | number | boolean | null>;
@@ -46,6 +49,7 @@ const columns: Array<{ key: string; label: string; type?: string }> = [
   { key: "invoiceStatus", label: "开票状态" },
   { key: "invoiceOriginalName", label: "发票附件" },
 ];
+const tableColumns = columns.map((column) => ({ ...column, sortable: true, filterable: true }));
 
 export function ServiceFeeStatementsPage() {
   const [rows, setRows] = useState<Row[]>([]);
@@ -63,33 +67,42 @@ export function ServiceFeeStatementsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [total, setTotal] = useState(0);
+  const [sortField, setSortField] = useState("");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>("");
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
   const pageSizeRef = useRef(pageSize);
   const fileRef = useRef<HTMLInputElement>(null);
   const uploadTargetRef = useRef<{ snapshotNo: string; invoiceStatus: string } | null>(null);
+  const beginRequest = useRequestGuard();
 
   function buildParams(nextPage = page, nextPageSize = pageSizeRef.current) {
     const params = new URLSearchParams({ page: String(nextPage), pageSize: String(nextPageSize) });
     for (const [key, value] of Object.entries({ keyword, writeOffMonth, countryCode, status, invoiceStatus, repaymentStatus })) {
       if (value.trim()) params.set(key, value.trim());
     }
+    if (sortField && sortOrder) { params.set("sortField", sortField); params.set("sortOrder", sortOrder); }
+    for (const [key, values] of Object.entries(columnFilters)) values.forEach((value) => params.append(`filter.${key}`, value));
     return params;
   }
 
   async function loadData(nextPage = page, nextPageSize = pageSizeRef.current) {
+    const isCurrentRequest = beginRequest();
     setLoading(true);
     try {
       const response = await fetch(`/api/service-fees/snapshots?${buildParams(nextPage, nextPageSize)}`);
       const data = (await response.json().catch(() => ({}))) as Partial<ListResponse> & { error?: string };
       if (!response.ok) throw new Error(data.error ?? "服务费对账单加载失败");
+      if (!isCurrentRequest()) return;
       setRows(data.rows ?? []);
       setTotal(Number(data.total ?? 0));
       setPage(Number(data.page ?? nextPage));
     } catch (error) {
+      if (!isCurrentRequest()) return;
       setRows([]);
       setTotal(0);
       alert(error instanceof Error ? error.message : "服务费对账单加载失败");
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
   }
 
@@ -101,6 +114,28 @@ export function ServiceFeeStatementsPage() {
         setCustomers(customerRows);
       });
   }, []);
+
+  useEffect(() => {
+    if (!Object.keys(columnFilters).length && !sortField && !sortOrder) return;
+    void loadData(1);
+  }, [columnFilters, sortField, sortOrder]);
+
+  async function loadColumnOptions(field: string, optionKeyword: string): Promise<TableFilterOption[]> {
+    const params = new URLSearchParams({ field });
+    if (optionKeyword.trim()) params.set("keyword", optionKeyword.trim());
+    for (const [key, values] of Object.entries(columnFilters)) {
+      if (key === field) continue;
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
+    const response = await fetch(`/api/service-fees/snapshots?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "筛选候选值加载失败");
+    return (data.options ?? []) as TableFilterOption[];
+  }
+
+  function renderHeader(column: (typeof tableColumns)[number]) {
+    return <TableColumnMenu column={column} filterValues={columnFilters[column.key] ?? []} loadOptions={(keyword) => loadColumnOptions(column.key, keyword)} onFilter={(values) => { setColumnFilters((current) => ({ ...current, [column.key]: values })); setPage(1); }} onSort={(order) => { setSortField(order ? column.key : ""); setSortOrder(order); setPage(1); }} sortOrder={sortField === column.key ? sortOrder : ""} />;
+  }
 
   function openRepayment(row: Row) {
     setRepaymentDraft({
@@ -316,11 +351,11 @@ export function ServiceFeeStatementsPage() {
           />
         </div>
 
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="service-fee-statements">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
-                {columns.map((column) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>{column.label}</th>)}
+                {tableColumns.map((column) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>{renderHeader(column)}</th>)}
                 <th className="sticky right-0 min-w-[150px] border-b border-[#ebeef5] bg-[#f5f7fa] px-3 py-3 text-left font-medium">操作</th>
               </tr>
             </thead>
@@ -461,7 +496,7 @@ export function ServiceFeeStatementsPage() {
               {!rows.length ? <tr><td className="py-12 text-center text-[#909399]" colSpan={columns.length + 1}>{loading ? "加载中..." : "暂无服务费对账单"}</td></tr> : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar
           page={page}
           pageSize={pageSize}

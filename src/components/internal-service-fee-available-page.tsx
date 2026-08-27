@@ -4,7 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { CheckSquare, RefreshCw, Search } from "lucide-react";
 import { formatDisplayValue } from "@/lib/display-format";
 import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
+import { fetchTableFilterOptions } from "@/lib/table-query-client";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableSortOrder } from "./table-column-menu";
+import { useRequestGuard } from "@/lib/table-query-client";
 import { Button, Input, Panel } from "./ui";
 
 type Row = Record<string, string | number | boolean | null>;
@@ -36,23 +40,37 @@ export function InternalServiceFeeAvailablePage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [total, setTotal] = useState(0);
   const pageSizeRef = useRef(pageSize);
+  const [sortField, setSortField] = useState("");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>("");
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
+  const beginRequest = useRequestGuard();
 
-  async function loadRows(nextPage = page, nextPageSize = pageSizeRef.current) {
+  async function loadRows(nextPage = page, nextPageSize = pageSizeRef.current, queryState = { sortField, sortOrder, columnFilters }) {
+    const isCurrentRequest = beginRequest();
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: String(nextPage), pageSize: String(nextPageSize) });
       if (keyword.trim()) params.set("keyword", keyword.trim());
+      if (queryState.sortField && queryState.sortOrder) { params.set("sortField", queryState.sortField); params.set("sortOrder", queryState.sortOrder); }
+      for (const [field, values] of Object.entries(queryState.columnFilters)) for (const value of values) params.append(`filter.${field}`, value);
       const response = await fetch(`/api/internal-service-fees/available?${params}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "待初始化清单加载失败");
+      if (!isCurrentRequest()) return;
       setRows(data.rows ?? []);
       setTotal(Number(data.total ?? 0));
       setPage(Number(data.page ?? nextPage));
     } catch (error) {
+      if (!isCurrentRequest()) return;
       alert(error instanceof Error ? error.message : "待初始化清单加载失败");
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
+  }
+
+  function refreshTableQuery(next: { sortField?: string; sortOrder?: TableSortOrder; columnFilters?: Record<string, string[]> }) {
+    const nextState = { sortField: next.sortField ?? sortField, sortOrder: next.sortOrder ?? sortOrder, columnFilters: next.columnFilters ?? columnFilters };
+    setSortField(nextState.sortField); setSortOrder(nextState.sortOrder); setColumnFilters(nextState.columnFilters); setPage(1); void loadRows(1, pageSizeRef.current, nextState);
   }
 
   useEffect(() => {
@@ -110,12 +128,21 @@ export function InternalServiceFeeAvailablePage() {
           <Button tone="success" onClick={() => void initialize()}><CheckSquare size={15} />初始化已选（{selected.length}）</Button>
           <Button tone="primary" onClick={() => void initialize(currentPageIds)}>初始化本页（{rows.length}）</Button>
         </div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="internal-service-fee-available">
           <table className="w-full min-w-[1560px] border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
                 <th className="w-12 border-b border-r border-[#ebeef5] px-3 py-3"><input type="checkbox" checked={allSelected} onChange={toggleCurrentPageSelection} /></th>
-                {columns.map(([key, label]) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={key}>{label}</th>)}
+                {columns.map(([key, label]) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={key}>
+                  <TableColumnMenu
+                    column={{ key, label, sortable: true, filterable: true }}
+                    sortOrder={sortField === key ? sortOrder : ""}
+                    filterValues={columnFilters[key] ?? []}
+                    loadOptions={(keyword) => fetchTableFilterOptions("/api/internal-service-fees/available", key, keyword, {}, columnFilters)}
+                    onSort={(order) => refreshTableQuery({ sortField: order ? key : "", sortOrder: order })}
+                    onFilter={(values) => refreshTableQuery({ columnFilters: { ...columnFilters, [key]: values } })}
+                  />
+                </th>)}
               </tr>
             </thead>
             <tbody>
@@ -129,7 +156,7 @@ export function InternalServiceFeeAvailablePage() {
               {!rows.length && <tr><td className="py-12 text-center text-[#909399]" colSpan={columns.length + 1}>{loading ? "加载中..." : "暂无待初始化实例"}</td></tr>}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar
           page={page}
           pageSize={pageSize}

@@ -13,6 +13,7 @@ import {
 import { attachPartyCodes } from "./party-display";
 import { firstDayOfMonth } from "./billing-workflow";
 import { DEFAULT_PAGE_SIZE, normalizePageSize } from "./pagination";
+import { appendTableInFilter, formatTableDateExpression, getTableFilterOptionsOrderBy, getTableSort } from "./table-query";
 import { sanitizeDocumentFileName } from "./document-utils";
 import {
   type ServiceFeeBillingRow,
@@ -52,12 +53,12 @@ export async function calculateServiceFees(searchParams: URLSearchParams) {
   const shouldPaginate = !exportAll && searchParams.has("page");
   const requestedPage = Math.max(1, Math.floor(Number(searchParams.get("page") ?? 1) || 1));
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
-  const { sql, params } = buildServiceFeeQuery(filters);
+  const { sql, params } = buildServiceFeeQuery(filters, searchParams);
   const loadPage = (targetPage: number) => queryRows<ServiceFeeRow>(
     `
       SELECT serviceFeeRows.*
       FROM (${sql}) serviceFeeRows
-      ORDER BY writeOffMonth, countryCode, batchName, requestNo, poNo, deviceCode, nameEn
+      ${getTableSort(searchParams, Object.fromEntries(Object.entries(getServiceFeeSortExpressions()).map(([key, expression]) => [key, expression.replace("combined.", "serviceFeeRows.")]))) || "ORDER BY writeOffMonth, countryCode, batchName, requestNo, poNo, deviceCode, nameEn"}
       ${shouldPaginate ? "LIMIT :limit OFFSET :offset" : ""}
     `,
     shouldPaginate ? { ...params, limit: pageSize, offset: (targetPage - 1) * pageSize } : params,
@@ -70,7 +71,7 @@ export async function calculateServiceFees(searchParams: URLSearchParams) {
   let summary = shouldPaginate ? null : summarizeServiceFeeRows(rows);
 
   if (shouldPaginate && includeSummary) {
-    const summaryQuery = canUseLightweightServiceFeeSummary(filters)
+    const summaryQuery = canUseLightweightServiceFeeSummary(filters) && !Array.from(searchParams.keys()).some((key) => key.startsWith("filter."))
       ? buildLightweightServiceFeeSummaryQuery(filters)
       : {
         sql: `
@@ -106,6 +107,39 @@ export async function calculateServiceFees(searchParams: URLSearchParams) {
     pageSize,
     totalPages,
   };
+}
+
+export async function listServiceFeeFilterOptions(searchParams: URLSearchParams) {
+  const field = searchParams.get("field")?.trim() ?? "";
+  const optionExpressions = Object.fromEntries(Object.entries(getServiceFeeSortExpressions()).map(([key, value]) => [key, value.replace(/^combined\./, "")])) as Record<string, string>;
+  const expression = optionExpressions[field];
+  if (!expression) return { options: [] as Array<{ value: string; count: number }> };
+  // `keyword` here belongs to the column candidate search. Do not feed it
+  // into the global service-fee keyword query, otherwise codes that are only
+  // present in the displayed party-code columns can never be returned.
+  const baseFilters: ServiceFeeFilters = {
+    startMonth: searchParams.get("startMonth")?.trim() || "",
+    endMonth: searchParams.get("endMonth")?.trim() || "",
+    countryCode: searchParams.get("countryCode")?.trim() || "",
+    batchName: searchParams.get("batchName")?.trim() || "",
+    lineType: searchParams.get("lineType")?.trim() || "",
+    requestType: searchParams.get("requestType")?.trim() || "",
+  };
+  const { sql, params } = buildServiceFeeQuery(baseFilters, new URLSearchParams());
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  const currentValue = `valuesList.\`${field}\``;
+  const where = [`${currentValue} IS NOT NULL`, `TRIM(CAST(${currentValue} AS CHAR)) <> ''`];
+  if (keyword) { where.push(`${currentValue} LIKE :optionKeyword`); params.optionKeyword = `%${keyword}%`; }
+  for (const [candidateField] of Object.entries(optionExpressions)) {
+    if (candidateField === field) continue;
+    const values = searchParams.getAll(`filter.${candidateField}`).map((value) => value.trim()).filter(Boolean);
+    if (!values.length) continue;
+    const name = `serviceFeeOption_${candidateField}`;
+    where.push(`valuesList.\`${candidateField}\` IN (:${name})`);
+    params[name] = Array.from(new Set(values));
+  }
+  const rows = await queryRows<{ value: string; count: number }>(`SELECT ${currentValue} AS value, COUNT(*) AS count FROM (SELECT ${Object.entries(optionExpressions).map(([key, value]) => `${value} AS \`${key}\``).join(", ")} FROM (${sql}) combined) valuesList WHERE ${where.join(" AND ")} GROUP BY ${currentValue} ORDER BY ${getTableFilterOptionsOrderBy(field, currentValue)} LIMIT 500`, params);
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
 }
 
 type ServiceFeeSummaryRow = {
@@ -238,7 +272,7 @@ function buildLightweightServiceFeeSummaryQuery(filters: ServiceFeeFilters) {
   };
 }
 
-function buildServiceFeeQuery(filters: ServiceFeeFilters) {
+function buildServiceFeeQuery(filters: ServiceFeeFilters, searchParams = new URLSearchParams()) {
   const params: Row = {};
   const billingWhere: string[] = [];
   const prepaymentWhere: string[] = [];
@@ -275,6 +309,8 @@ function buildServiceFeeQuery(filters: ServiceFeeFilters) {
     finalWhere.push(`CONCAT_WS(' ', writeOffMonth, countryCode, batchName, requestNo, poNo, deviceCode, modelCode, nameEn, currency, billingCurrency, prepaymentCurrency, prepaymentContractNos, sourceNote) LIKE :keyword`);
     params.keyword = `%${filters.keyword}%`;
   }
+  const filterExpressions = getServiceFeeSortExpressions();
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(finalWhere, params, expression, field, searchParams, "serviceFeeColumn");
   const whereBilling = billingWhere.length ? `WHERE ${billingWhere.join(" AND ")}` : "";
   const wherePrepayment = prepaymentWhere.length ? `WHERE ${prepaymentWhere.join(" AND ")}` : "";
   const whereFinal = finalWhere.length ? `WHERE ${finalWhere.join(" AND ")}` : "";
@@ -289,6 +325,9 @@ function buildServiceFeeQuery(filters: ServiceFeeFilters) {
         MAX(COALESCE(NULLIF(m.supplierId, ''), ri.supplierId, fallback.supplierId)) AS supplierId,
         MAX(COALESCE(NULLIF(m.undertakingUnitId, ''), ri.undertakingUnitId, fallback.undertakingUnitId)) AS undertakingUnitId,
         MAX(COALESCE(NULLIF(m.customerId, ''), ri.customerId, fallback.customerId)) AS customerId,
+        MAX(supplier.supplierCode) AS supplierCode,
+        MAX(undertaking.undertakingUnitCode) AS undertakingUnitCode,
+        MAX(customer.customerCode) AS customerCode,
         MAX(m.quantity) AS quantity, MAX(m.currency) AS currency,
         MAX(COALESCE(NULLIF(m.requestType, ''), NULLIF(ledger.requestType, ''), NULLIF(ri.requestType, ''), NULLIF(fallback.requestType, ''), '整机')) AS requestType,
         MAX(COALESCE(country.vatRate, 0)) AS vatRate,
@@ -299,6 +338,9 @@ function buildServiceFeeQuery(filters: ServiceFeeFilters) {
       LEFT JOIN purchaseorderitems purchaseItem ON purchaseItem.id = ledger.purchaseOrderItemId
       LEFT JOIN requestitems ri ON ri.id = purchaseItem.requestItemId
       LEFT JOIN requestitems fallback ON fallback.requestNo = m.requestNo AND fallback.deviceCode = m.deviceCode
+      LEFT JOIN suppliers supplier ON supplier.supplierId = COALESCE(NULLIF(m.supplierId, ''), ri.supplierId, fallback.supplierId)
+      LEFT JOIN undertakingunits undertaking ON undertaking.undertakingUnitId = COALESCE(NULLIF(m.undertakingUnitId, ''), ri.undertakingUnitId, fallback.undertakingUnitId)
+      LEFT JOIN customers customer ON customer.customerId = COALESCE(NULLIF(m.customerId, ''), ri.customerId, fallback.customerId)
       LEFT JOIN countries country ON country.code = m.countryCode
       ${whereBilling}
       GROUP BY rowKey, DATE_FORMAT(m.writeOffMonth, '%Y-%m-%d'), m.countryCode, m.batchName, m.requestNo, m.poNo, m.deviceCode
@@ -314,6 +356,9 @@ function buildServiceFeeQuery(filters: ServiceFeeFilters) {
         MAX(COALESCE(NULLIF(p.supplierId, ''), ri.supplierId, fallback.supplierId)) AS supplierId,
         MAX(COALESCE(NULLIF(p.undertakingUnitId, ''), ri.undertakingUnitId, fallback.undertakingUnitId)) AS undertakingUnitId,
         MAX(COALESCE(NULLIF(p.customerId, ''), ri.customerId, fallback.customerId)) AS customerId,
+        MAX(supplier.supplierCode) AS supplierCode,
+        MAX(undertaking.undertakingUnitCode) AS undertakingUnitCode,
+        MAX(customer.customerCode) AS customerCode,
         MAX(p.quantity) AS quantity, MAX(p.currency) AS currency,
         MAX(COALESCE(NULLIF(p.requestType, ''), NULLIF(contractItem.requestType, ''), NULLIF(ri.requestType, ''), NULLIF(fallback.requestType, ''), CASE WHEN p.lineType = 'fee' THEN '费用' ELSE '整机' END)) AS requestType,
         MAX(COALESCE(country.vatRate, 0)) AS vatRate,
@@ -325,6 +370,9 @@ function buildServiceFeeQuery(filters: ServiceFeeFilters) {
       LEFT JOIN prepaymentcontractitems contractItem ON contractItem.id = p.contractLineId
       LEFT JOIN requestitems ri ON ri.id = contractItem.requestItemId
       LEFT JOIN requestitems fallback ON fallback.requestNo = p.requestNo AND fallback.deviceCode = p.deviceCode
+      LEFT JOIN suppliers supplier ON supplier.supplierId = COALESCE(NULLIF(p.supplierId, ''), ri.supplierId, fallback.supplierId)
+      LEFT JOIN undertakingunits undertaking ON undertaking.undertakingUnitId = COALESCE(NULLIF(p.undertakingUnitId, ''), ri.undertakingUnitId, fallback.undertakingUnitId)
+      LEFT JOIN customers customer ON customer.customerId = COALESCE(NULLIF(p.customerId, ''), ri.customerId, fallback.customerId)
       LEFT JOIN countries country ON country.code = p.countryCode
       ${wherePrepayment}
       GROUP BY rowKey, DATE_FORMAT(p.writeOffMonth, '%Y-%m-%d'), p.countryCode, p.batchName, p.requestNo, p.poNo, p.deviceCode
@@ -345,6 +393,9 @@ function buildServiceFeeQuery(filters: ServiceFeeFilters) {
         COALESCE(b.supplierId, p.supplierId) AS supplierId,
         COALESCE(b.undertakingUnitId, p.undertakingUnitId) AS undertakingUnitId,
         COALESCE(b.customerId, p.customerId) AS customerId,
+        COALESCE(b.supplierCode, p.supplierCode) AS supplierCode,
+        COALESCE(b.undertakingUnitCode, p.undertakingUnitCode) AS undertakingUnitCode,
+        COALESCE(b.customerCode, p.customerCode) AS customerCode,
         CASE WHEN COALESCE(b.createdAt, '9999-12-31') <= COALESCE(p.createdAt, '9999-12-31')
           THEN b.createdAt ELSE p.createdAt END AS createdAt,
         CASE WHEN COALESCE(b.updatedAt, '') >= COALESCE(p.updatedAt, '')
@@ -371,6 +422,17 @@ function buildServiceFeeQuery(filters: ServiceFeeFilters) {
     ) SELECT * FROM combined ${whereFinal}
   `;
   return { sql, params };
+}
+
+function getServiceFeeSortExpressions() {
+  return {
+    writeOffMonth: "combined.writeOffMonth", countryCode: "combined.countryCode", batchName: "combined.batchName", requestNo: "combined.requestNo",
+    poNo: "combined.poNo", deviceCode: "combined.deviceCode", requestType: "combined.requestType", modelCode: "combined.modelCode", nameEn: "combined.nameEn",
+    undertakingUnitCode: "combined.undertakingUnitCode", supplierCode: "combined.supplierCode", customerCode: "combined.customerCode", quantity: "combined.quantity",
+    lineType: "combined.lineType", billingCurrency: "combined.billingCurrency", billingAmount: "combined.billingAmount", prepaymentCurrency: "combined.prepaymentCurrency",
+    prepaymentAmount: "combined.prepaymentAmount", serviceFeeAmount: "combined.serviceFeeAmount", serviceFeeAmountExcludingTax: "combined.serviceFeeAmountExcludingTax",
+    prepaymentContractNos: "combined.prepaymentContractNos", sourceNote: "combined.sourceNote", createdAt: "combined.createdAt", updatedAt: "combined.updatedAt",
+  };
 }
 
 export async function createServiceFeeStatementDraft({
@@ -487,6 +549,12 @@ export async function listServiceFeeStatements(searchParams: URLSearchParams) {
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
   const whereParts: string[] = [];
   const params: Row = {};
+  const filterExpressions: Record<string, string> = {
+    snapshotNo: "snapshotNo", writeOffMonth: formatTableDateExpression("COALESCE(writeOffMonth, startMonth, endMonth)"), countryCode: "countryCode", status: "status",
+    billingTotal: "billingTotal", prepaymentTotal: "prepaymentTotal", serviceFeeTotal: "serviceFeeTotal", serviceFeeTotalExcludingTax: "serviceFeeTotalExcludingTax",
+    repaymentStatus: "repaymentStatus", repaymentCurrency: "repaymentCurrency", repaymentAmount: "repaymentAmount", invoiceStatus: "invoiceStatus", invoiceOriginalName: "invoiceOriginalName",
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(whereParts, params, expression, field, searchParams, "serviceStatement");
   if (filters.keyword) {
     whereParts.push("CONCAT_WS(' ', snapshotNo, countryCode, status, invoiceStatus, repaymentStatus, invoiceOriginalName) LIKE :keyword");
     params.keyword = `%${filters.keyword}%`;
@@ -539,7 +607,7 @@ export async function listServiceFeeStatements(searchParams: URLSearchParams) {
              DATE_FORMAT(updatedAt, '%Y-%m-%d') AS updatedAt
       FROM servicefeesnapshots
       ${where}
-      ORDER BY COALESCE(writeOffMonth, startMonth, endMonth) DESC, createdAt DESC
+      ${getTableSort(searchParams, filterExpressions) || "ORDER BY COALESCE(writeOffMonth, startMonth, endMonth) DESC, createdAt DESC"}
       ${exportAll ? "" : "LIMIT :limit OFFSET :offset"}
     `,
     exportAll ? params : { ...params, limit: pageSize, offset: (page - 1) * pageSize },
@@ -568,6 +636,31 @@ export async function listServiceFeeStatements(searchParams: URLSearchParams) {
     defaultRepaymentAmount: Number(row.serviceFeeTotal ?? 0),
   }));
   return { rows: await attachRepaymentPartyCodes(rowsWithDefaults), total, page, pageSize, totalPages };
+}
+
+export async function listServiceFeeStatementFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    snapshotNo: "snapshotNo", writeOffMonth: formatTableDateExpression("COALESCE(writeOffMonth, startMonth, endMonth)"), countryCode: "countryCode", status: "status",
+    billingTotal: "billingTotal", prepaymentTotal: "prepaymentTotal", serviceFeeTotal: "serviceFeeTotal", serviceFeeTotalExcludingTax: "serviceFeeTotalExcludingTax",
+    repaymentStatus: "repaymentStatus", repaymentCurrency: "repaymentCurrency", repaymentAmount: "repaymentAmount", invoiceStatus: "invoiceStatus", invoiceOriginalName: "invoiceOriginalName",
+  };
+  const field = searchParams.get("field")?.trim() ?? "";
+  const expression = expressions[field];
+  if (!expression) return { options: [] as Array<{ value: string; count: number }> };
+  const params: Row = {};
+  const where = [`${expression} IS NOT NULL`, `TRIM(CAST(${expression} AS CHAR)) <> ''`];
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  if (keyword) { where.push(`${expression} LIKE :optionKeyword`); params.optionKeyword = `%${keyword}%`; }
+  for (const [candidateField, candidateExpression] of Object.entries(expressions)) {
+    if (candidateField === field) continue;
+    const values = searchParams.getAll(`filter.${candidateField}`).map((value) => value.trim()).filter(Boolean);
+    if (!values.length) continue;
+    const name = `serviceStatementOption_${candidateField}`;
+    where.push(`${candidateExpression} IN (:${name})`);
+    params[name] = Array.from(new Set(values));
+  }
+  const rows = await queryRows<{ value: string; count: number }>(`SELECT ${expression} AS value, COUNT(*) AS count FROM servicefeesnapshots WHERE ${where.join(" AND ")} GROUP BY ${expression} ORDER BY ${getTableFilterOptionsOrderBy(field, expression)} LIMIT 500`, params);
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
 }
 
 async function attachRepaymentPartyCodes(rows: Row[]) {

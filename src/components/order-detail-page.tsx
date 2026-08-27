@@ -13,6 +13,7 @@ import { buildPurchaseProductLines, calculatePurchaseTotalAmount } from "@/lib/p
 import { PurchaseOrderDemandPlanTabs } from "./purchase-order-demand-plan-tabs";
 import { getReturnTo } from "@/lib/client-list-navigation";
 import { Button, Input, Panel } from "./ui";
+import { StickyTable } from "./sticky-table";
 
 type Row = Record<string, string | number | boolean | null>;
 
@@ -316,7 +317,7 @@ export function OrderDetailPage({
 
       <Panel>
         <div className="border-b border-[#ebeef5] px-4 py-3 font-medium text-[#303133]">明细列表</div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey={`order-detail-${mode}`}>
           <table className={mode === "purchase" ? "min-w-[1800px] whitespace-nowrap border-collapse text-sm" : "min-w-[1050px] whitespace-nowrap border-collapse text-sm"}>
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -353,7 +354,7 @@ export function OrderDetailPage({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
       </Panel>
       {mode === "purchase" ? (
         <PurchaseOrderDemandPlanTabs

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { EntityConfig } from "@/lib/modules";
 import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
 import { Button, Panel } from "./ui";
+import { StickyTable } from "./sticky-table";
 import { EntityPage } from "./entity-page";
 
 type Row = Record<string, string | number | boolean | null>;
@@ -92,7 +93,7 @@ export function MasterDetailPage({
                 添加明细
               </Button>
             </div>
-            <div className="table-scroll overflow-auto border border-[#ebeef5]">
+            <StickyTable className="table-scroll overflow-auto border border-[#ebeef5]" tableKey={`${masterConfig.key}-details`}>
               <table className="min-w-full border-collapse text-sm">
                 <thead className="bg-[#f5f7fa] text-[#303133]">
                   <tr>
@@ -122,7 +123,7 @@ export function MasterDetailPage({
                   )}
                 </tbody>
               </table>
-            </div>
+            </StickyTable>
           </div>
         </div>
       </Panel>

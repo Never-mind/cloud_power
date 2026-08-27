@@ -1111,6 +1111,7 @@ if (purchaseOrderConfig) {
     { key: "purchaseOrderId", label: "系统采购ID", defaultVisible: false },
     { key: "poNo", label: "PO订单号" },
     { key: "requestNo", label: "来源需求单号" },
+    { key: "countryCode", label: "国家" },
     { key: "requestType", label: "类型" },
     { key: "status", label: "采购状态" },
     { key: "currency", label: "币种", type: "select", options: PURCHASE_CURRENCY_OPTIONS.map((currency) => ({ label: currency, value: currency })) },

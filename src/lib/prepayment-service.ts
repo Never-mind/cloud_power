@@ -8,6 +8,7 @@ import {
 } from "./db";
 import { attachPartyCodes } from "./party-display";
 import { DEFAULT_PAGE_SIZE, normalizePageSize } from "./pagination";
+import { appendTableFilterOptionConditions, appendTableInFilter, formatTableDateExpression, getTableSort, listSqlFilterOptions } from "./table-query";
 import {
   buildMonthlyWriteOffRows,
   buildPrepaymentDraft,
@@ -35,6 +36,7 @@ export async function listAvailablePrepaymentLines(options: {
   countryCode?: string;
   purchaseOrderItemIds?: string[];
   requestType?: string;
+  searchParams?: URLSearchParams;
 } = {}) {
   const requestedPage = Math.max(1, Math.floor(Number(options.page ?? 1) || 1));
   const conditions = [
@@ -56,6 +58,17 @@ export async function listAvailablePrepaymentLines(options: {
     conditions.push("(req.countryCode LIKE :keyword OR req.batchName LIKE :keyword OR COALESCE(poi.requestNo, po.requestNo, ri.requestNo) LIKE :keyword OR poi.poNo LIKE :keyword OR ri.deviceCode LIKE :keyword OR im.modelCode LIKE :keyword OR im.nameEn LIKE :keyword)");
     params.keyword = `%${options.keyword.trim()}%`;
   }
+  const filterExpressions: Record<string, string> = {
+    countryCode: "req.countryCode", batchName: "req.batchName", requestNo: "COALESCE(poi.requestNo, po.requestNo, ri.requestNo)",
+    poNo: "poi.poNo", deviceCode: "ri.deviceCode", requestType: "COALESCE(NULLIF(poi.requestType, ''), NULLIF(ri.requestType, ''), NULLIF(req.requestType, ''), '整机')",
+    modelCode: "im.modelCode", nameEn: "im.nameEn", quantity: "ri.quantity", currency: "po.currency", actualUnitPrice: "poi.unitPrice",
+  };
+  if (options.searchParams) {
+    for (const [field, expression] of Object.entries(filterExpressions)) {
+      appendTableInFilter(conditions, params, expression, field, options.searchParams, "availablePrepayment");
+    }
+  }
+  const requestedSort = options.searchParams ? getTableSort(options.searchParams, filterExpressions) : "";
   const ids = Array.from(new Set((options.purchaseOrderItemIds ?? []).map(String).filter(Boolean)));
   // Explicit workflow selections are intentionally not restricted by the list cap.
   const pageSize = ids.length
@@ -96,13 +109,7 @@ export async function listAvailablePrepaymentLines(options: {
         po.status AS purchaseStatus,
         req.status AS requestStatus
       ${sourceFrom}
-      ORDER BY
-        CASE WHEN TRIM(COALESCE(req.batchName, '')) REGEXP '^[A-Za-z]+[[:space:]]*-[[:space:]]*[0-9]+$' THEN 0 ELSE 1 END,
-        CAST(SUBSTRING_INDEX(TRIM(req.batchName), '-', -1) AS UNSIGNED) DESC,
-        UPPER(TRIM(SUBSTRING_INDEX(TRIM(req.batchName), '-', 1))) ASC,
-        req.countryCode ASC,
-        po.poNo ASC,
-        poi.id
+      ${requestedSort || "ORDER BY CASE WHEN TRIM(COALESCE(req.batchName, '')) REGEXP '^[A-Za-z]+[[:space:]]*-[[:space:]]*[0-9]+$' THEN 0 ELSE 1 END, CAST(SUBSTRING_INDEX(TRIM(req.batchName), '-', -1) AS UNSIGNED) DESC, UPPER(TRIM(SUBSTRING_INDEX(TRIM(req.batchName), '-', 1))) ASC, req.countryCode ASC, po.poNo ASC, poi.id"}
       LIMIT :limit OFFSET :offset
     `,
     { ...params, limit: pageSize, offset: (page - 1) * pageSize },
@@ -114,6 +121,33 @@ export async function listAvailablePrepaymentLines(options: {
     pageSize,
     totalPages,
   };
+}
+
+export async function listAvailablePrepaymentLineFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    countryCode: "req.countryCode", batchName: "req.batchName", requestNo: "COALESCE(poi.requestNo, po.requestNo, ri.requestNo)",
+    poNo: "poi.poNo", deviceCode: "ri.deviceCode", requestType: "COALESCE(NULLIF(poi.requestType, ''), NULLIF(ri.requestType, ''), NULLIF(req.requestType, ''), '整机')",
+    modelCode: "im.modelCode", nameEn: "im.nameEn", quantity: "ri.quantity", currency: "po.currency", actualUnitPrice: "poi.unitPrice",
+  };
+  return listSqlFilterOptions({
+    expressions,
+    searchParams,
+    from: `purchaseorderitems poi
+      LEFT JOIN purchaseorders po ON po.purchaseOrderId = poi.purchaseOrderId OR (poi.purchaseOrderId IS NULL AND po.poNo = poi.poNo)
+      LEFT JOIN requestitems ri ON ri.id = poi.requestItemId
+      LEFT JOIN requests req ON req.requestNo = COALESCE(poi.requestNo, po.requestNo, ri.requestNo)
+      LEFT JOIN instancemodels im ON im.deviceCode = ri.deviceCode`,
+    conditions: [
+      "po.status LIKE :availablePurchaseStatus",
+      "req.status <> :availableRequestDraftStatus",
+      `NOT EXISTS (
+        SELECT 1 FROM prepaymentcontractitems pci
+        INNER JOIN prepaymentcontracts pc ON pc.contractNo = pci.contractNo
+        WHERE pci.purchaseOrderItemId = poi.id AND pc.status IN ('草稿', '已确认')
+      )`,
+    ],
+    params: { availablePurchaseStatus: "%确认%", availableRequestDraftStatus: "草稿" },
+  });
 }
 
 export async function createPrepaymentDraft({
@@ -396,6 +430,13 @@ export async function listMonthlyPrepaymentWriteOffs(searchParams: URLSearchPara
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
   const whereParts: string[] = [];
   const params: Row = {};
+  const filterExpressions: Record<string, string> = {
+    writeOffMonth: formatTableDateExpression("mpw.writeOffMonth"), contractNo: "mpw.contractNo", countryCode: "mpw.countryCode", batchName: "mpw.batchName",
+    requestNo: "mpw.requestNo", poNo: "mpw.poNo", deviceCode: "mpw.deviceCode", requestType: "mpw.requestType", modelCode: "mpw.modelCode",
+    nameEn: "mpw.nameEn", quantity: "mpw.quantity", currency: "mpw.currency", originalAmount: "mpw.originalAmount", monthlyAmount: "mpw.monthlyAmount",
+    lineType: "mpw.lineType", sourceType: "mpw.sourceType", adjustmentNo: "mpw.adjustmentNo",
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(whereParts, params, expression, field, searchParams, "monthlyPrepayment");
 
   if (keyword) {
     whereParts.push(
@@ -487,13 +528,7 @@ export async function listMonthlyPrepaymentWriteOffs(searchParams: URLSearchPara
         ON riByBusinessKey.keyRequestNo = mpw.requestNo
         AND riByBusinessKey.keyDeviceCode = mpw.deviceCode
       ${where}
-      ORDER BY
-        mpw.writeOffMonth DESC,
-        CASE WHEN TRIM(COALESCE(mpw.batchName, '')) REGEXP '^[A-Za-z]+[[:space:]]*-[[:space:]]*[0-9]+$' THEN 0 ELSE 1 END,
-        CAST(SUBSTRING_INDEX(TRIM(mpw.batchName), '-', -1) AS UNSIGNED) DESC,
-        UPPER(TRIM(SUBSTRING_INDEX(TRIM(mpw.batchName), '-', 1))) ASC,
-        mpw.contractNo,
-        mpw.contractLineId
+      ${getTableSort(searchParams, filterExpressions) || "ORDER BY mpw.writeOffMonth DESC, mpw.contractNo, mpw.contractLineId"}
       ${exportAll ? "" : "LIMIT :limit OFFSET :offset"}
     `,
     params,
@@ -507,6 +542,24 @@ export async function listMonthlyPrepaymentWriteOffs(searchParams: URLSearchPara
     pageSize,
     totalPages,
   };
+}
+
+export async function listMonthlyPrepaymentWriteOffFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    writeOffMonth: formatTableDateExpression("writeOffMonth"), contractNo: "contractNo", countryCode: "countryCode", batchName: "batchName", requestNo: "requestNo",
+    poNo: "poNo", deviceCode: "deviceCode", requestType: "requestType", modelCode: "modelCode", nameEn: "nameEn", quantity: "quantity",
+    currency: "currency", originalAmount: "originalAmount", monthlyAmount: "monthlyAmount", lineType: "lineType", sourceType: "sourceType", adjustmentNo: "adjustmentNo",
+  };
+  const field = searchParams.get("field")?.trim() ?? "";
+  const expression = expressions[field];
+  if (!expression) return { options: [] as Array<{ value: string; count: number }> };
+  const params: Row = {};
+  const where = [`${expression} IS NOT NULL`, `TRIM(CAST(${expression} AS CHAR)) <> ''`];
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  if (keyword) { where.push(`${expression} LIKE :optionKeyword`); params.optionKeyword = `%${keyword}%`; }
+  appendTableFilterOptionConditions(where, params, expressions, searchParams, field);
+  const rows = await queryRows<{ value: string; count: number }>(`SELECT ${expression} AS value, COUNT(*) AS count FROM monthlyprepaymentwriteoffs WHERE ${where.join(" AND ")} GROUP BY ${expression} ORDER BY value LIMIT 500`, params);
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
 }
 
 async function insertPrepaymentLine(

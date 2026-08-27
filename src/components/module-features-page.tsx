@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Check, RefreshCw, Save, ShieldOff } from "lucide-react";
 import { Button, Panel } from "./ui";
+import { StickyTable } from "./sticky-table";
 
 type Feature = {
   key: string;
@@ -64,7 +65,7 @@ export function ModuleFeaturesPage() {
       <Button onClick={() => void load()}><RefreshCw size={15} />刷新</Button>
     </div>
     {!isAdmin && !loading ? <div className="border-b border-[#f5dab1] bg-[#fdf6ec] px-4 py-3 text-sm text-[#a66b00]">当前账号没有修改权限，仅可查看模块状态。</div> : null}
-    <div className="table-scroll overflow-auto">
+    <StickyTable className="table-scroll overflow-auto" tableKey="module-features">
       <table className="min-w-[900px] w-full border-collapse text-sm">
         <thead className="bg-[#f5f7fa]"><tr>{["模块名称", "所属目录", "路由", "默认状态", "当前状态", "操作"].map((label) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-4 py-3 text-left font-medium" key={label}>{label}</th>)}</tr></thead>
         <tbody>
@@ -80,6 +81,6 @@ export function ModuleFeaturesPage() {
           {loading ? <tr><td className="py-10 text-center text-[#909399]" colSpan={6}>加载中</td></tr> : null}
         </tbody>
       </table>
-    </div>
+    </StickyTable>
   </Panel>;
 }

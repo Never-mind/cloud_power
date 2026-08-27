@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   listPrepaymentWriteOffAdjustments,
+  listPrepaymentAdjustmentFilterOptions,
   savePrepaymentWriteOffAdjustment,
 } from "@/lib/prepayment-adjustment-service";
 
 export async function GET(request: NextRequest) {
+  if (request.nextUrl.searchParams.get("field")) {
+    return NextResponse.json(await listPrepaymentAdjustmentFilterOptions(request.nextUrl.searchParams));
+  }
   const data = await listPrepaymentWriteOffAdjustments(request.nextUrl.searchParams);
   return NextResponse.json(data);
 }

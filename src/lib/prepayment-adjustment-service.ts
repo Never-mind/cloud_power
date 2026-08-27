@@ -1,5 +1,6 @@
 import { execute, queryRows, type Row } from "./db";
 import { firstDayOfMonth } from "./prepayment-workflow";
+import { appendTableFilterOptionConditions, appendTableInFilter, getTableFilterOptionsOrderBy, getTableSort } from "./table-query";
 import {
   buildPrepaymentWriteOffAdjustmentItems,
   type PrepaymentMonthlyWriteOffForAdjustment,
@@ -62,6 +63,10 @@ export async function listPrepaymentWriteOffAdjustments(searchParams: URLSearchP
   const pageSize = Math.min(100, Math.max(1, Math.floor(Number(searchParams.get("pageSize") ?? 20) || 20)));
   const whereParts: string[] = [];
   const params: Row = {};
+  const filterExpressions: Record<string, string> = {
+    adjustmentNo: "adjustmentNo", status: "status", countryCode: "countryCode", batchName: "batchName", contractNo: "contractNo", itemCount: "itemCount", differenceTotal: "differenceTotal", reason: "reason",
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(whereParts, params, expression, field, searchParams, "prepaymentAdjustment");
 
   if (keyword) {
     whereParts.push(
@@ -95,13 +100,29 @@ export async function listPrepaymentWriteOffAdjustments(searchParams: URLSearchP
         updatedAt
       FROM prepaymentwriteoffadjustments
       ${where}
-      ORDER BY createdAt DESC
+      ${getTableSort(searchParams, filterExpressions) || "ORDER BY createdAt DESC"}
       LIMIT :limit OFFSET :offset
     `,
     { ...params, limit: pageSize, offset: (page - 1) * pageSize },
   );
 
   return { rows, total, page, pageSize, totalPages };
+}
+
+export async function listPrepaymentAdjustmentFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    adjustmentNo: "adjustmentNo", status: "status", countryCode: "countryCode", batchName: "batchName", contractNo: "contractNo", itemCount: "itemCount", differenceTotal: "differenceTotal", reason: "reason",
+  };
+  const field = searchParams.get("field")?.trim() ?? "";
+  const expression = expressions[field];
+  if (!expression) return { options: [] as Array<{ value: string; count: number }> };
+  const params: Row = {};
+  const where = [`${expression} IS NOT NULL`, `TRIM(CAST(${expression} AS CHAR)) <> ''`];
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  if (keyword) { where.push(`${expression} LIKE :optionKeyword`); params.optionKeyword = `%${keyword}%`; }
+  appendTableFilterOptionConditions(where, params, expressions, searchParams, field);
+  const rows = await queryRows<{ value: string; count: number }>(`SELECT ${expression} AS value, COUNT(*) AS count FROM prepaymentwriteoffadjustments WHERE ${where.join(" AND ")} GROUP BY ${expression} ORDER BY ${getTableFilterOptionsOrderBy(field, expression)} LIMIT 500`, params);
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
 }
 
 export async function getPrepaymentWriteOffAdjustment(adjustmentNo: string) {

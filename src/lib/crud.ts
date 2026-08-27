@@ -4,6 +4,7 @@ import { attachPartyCodes } from "./party-display";
 import type { EntityConfig } from "./modules";
 import { DEFAULT_PAGE_SIZE, normalizePageSize } from "./pagination";
 import { requireRequestType } from "./request-type";
+import { formatTableDateExpression, getNaturalBatchSort } from "./table-query";
 
 function quoteIdentifier(identifier: string) {
   return `\`${identifier.replace(/`/g, "``")}\``;
@@ -85,8 +86,20 @@ export async function listEntityRows(config: EntityConfig, searchParams: URLSear
       ? partyCodeDisplayFields
       : new Set<string>();
   const storageFields = fields.filter((field) => !displayOnlyFields.has(field));
+  const fieldTypes = new Map(
+    [...config.listFields, ...config.formFields].map((field) => [field.key, field.type]),
+  );
   const selectedFields = storageFields
-    .map((field) => shipmentAlias ? `${fieldReference(field)} AS ${quoteIdentifier(field)}` : quoteIdentifier(field))
+    .map((field) => {
+      const reference = fieldReference(field);
+      const type = fieldTypes.get(field);
+      const selectedReference = type === "date" || type === "datetime"
+        ? formatTableDateExpression(reference)
+        : field === "countryCode"
+          ? normalizeCountryExpression(reference)
+          : reference;
+      return `${selectedReference} AS ${quoteIdentifier(field)}`;
+    })
     .concat(config.key === "purchase-orders"
       ? [`
           COALESCE((
@@ -141,6 +154,11 @@ export async function listEntityRows(config: EntityConfig, searchParams: URLSear
         params.countryCode = normalizeCountryCodeFilter(value);
         continue;
       }
+      if (filter.key === "countryCode") {
+        whereParts.push(`${getEntityFilterFieldExpression(config, filter.key, shipmentAlias)} = :${filter.key}`);
+        params[filter.key] = normalizeCountryCodeFilter(value);
+        continue;
+      }
       if (filter.key === "requestType" && config.key === "purchase-orders") {
         whereParts.push(`
           EXISTS (
@@ -190,8 +208,21 @@ export async function listEntityRows(config: EntityConfig, searchParams: URLSear
     params.purchaseOrderId = searchParams.get("purchaseOrderId")!.trim();
   }
 
+  const filterableStorageFields = new Set(storageFields);
+  for (const field of config.listFields) {
+    const values = Array.from(new Set(searchParams.getAll(`filter.${field.key}`).map((value) => value.trim()).filter(Boolean)));
+    if (!values.length) continue;
+    const parameterName = `columnFilter_${field.key.replace(/[^a-zA-Z0-9_]/g, "_")}`;
+    const expression = filterableStorageFields.has(field.key)
+      ? getEntityFilterFieldExpression(config, field.key, shipmentAlias)
+      : getEntityDisplayFieldExpression(config, field.key, shipmentAlias);
+    if (!expression) continue;
+    whereParts.push(`${expression} IN (:${parameterName})`);
+    params[parameterName] = values;
+  }
+
   const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
-  const orderBy = getEntityOrderBy(config, shipmentAlias);
+  const orderBy = getEntityOrderBy(config, shipmentAlias, searchParams);
   const [{ total }] = await queryRows<{ total: number }>(
     `SELECT COUNT(*) AS total FROM ${tableSource} ${where}`,
     params,
@@ -224,7 +255,23 @@ function normalizeCountryCodeFilter(value: string) {
   return value.split(/\s*-\s*/, 1)[0].trim();
 }
 
-export function getEntityOrderBy(config: EntityConfig, shipmentAlias = "shipment") {
+export function getEntityOrderBy(config: EntityConfig, shipmentAlias = "shipment", searchParams?: URLSearchParams) {
+  const requestedSortField = searchParams?.get("sortField")?.trim() ?? "";
+  const requestedSortOrder = searchParams?.get("sortOrder") === "asc" ? "ASC" : searchParams?.get("sortOrder") === "desc" ? "DESC" : "";
+  const sortableFields = new Set(config.listFields.map((field) => field.key));
+  const fields = new Set([
+    ...config.listFields.map((field) => field.key),
+    ...config.formFields.map((field) => field.key),
+  ]);
+  if (requestedSortField && requestedSortOrder && sortableFields.has(requestedSortField) && fields.has(requestedSortField)) {
+    const sortReference = getEntitySortReference(config, requestedSortField, shipmentAlias);
+    if (sortReference) {
+      const tieBreaker = config.primaryKey === requestedSortField ? "" : `${fieldReferenceForSort(config, config.primaryKey, shipmentAlias)} ASC`;
+      return `ORDER BY ${requestedSortField === "batchName"
+        ? getNaturalBatchSort(sortReference, requestedSortOrder, tieBreaker)
+        : `${sortReference} ${requestedSortOrder}${tieBreaker ? `, ${tieBreaker}` : ""}`}`;
+    }
+  }
   if (config.key === "shipments") {
     const prefix = shipmentAlias ? `${shipmentAlias}.` : "";
     return `
@@ -265,6 +312,203 @@ export function getEntityOrderBy(config: EntityConfig, shipmentAlias = "shipment
     );
   }
   return config.defaultSort ? `ORDER BY ${config.defaultSort}` : "";
+}
+
+function fieldReferenceForSort(config: EntityConfig, field: string, shipmentAlias: string) {
+  return shipmentAlias && config.key === "shipments"
+    ? `${shipmentAlias}.${quoteIdentifier(field)}`
+    : quoteIdentifier(field);
+}
+
+function getEntitySortReference(config: EntityConfig, field: string, shipmentAlias: string) {
+  const displayOnlyFields = config.key === "shipments"
+    ? shipmentDisplayFields
+    : config.key === "service-fee-snapshots"
+      ? new Set(["receivingUnitCode", "payerCustomerCode"])
+      : config.key === "purchase-orders"
+        ? new Set(["requestType"])
+        : financePartyEntityKeys.has(config.key)
+          ? partyCodeDisplayFields
+          : new Set<string>();
+  if (displayOnlyFields.has(field)) {
+    const displayExpression = getEntityDisplayFieldExpression(config, field, shipmentAlias);
+    if (displayExpression) return displayExpression;
+    if (config.key === "purchase-orders" && field === "requestType") {
+      return `(SELECT GROUP_CONCAT(DISTINCT COALESCE(NULLIF(typeItem.requestType, ''), NULLIF(typeRequestItem.requestType, ''), NULLIF(typeRequest.requestType, ''), '整机') ORDER BY COALESCE(NULLIF(typeItem.requestType, ''), NULLIF(typeRequestItem.requestType, ''), NULLIF(typeRequest.requestType, ''), '整机') SEPARATOR ' / ') FROM purchaseorderitems typeItem LEFT JOIN requestitems typeRequestItem ON typeRequestItem.id = typeItem.requestItemId LEFT JOIN requests typeRequest ON typeRequest.requestNo = COALESCE(typeItem.requestNo, typeRequestItem.requestNo) WHERE typeItem.purchaseOrderId = purchaseorders.purchaseOrderId)`;
+    }
+    return null;
+  }
+  if (field === "countryCode") return getEntityFilterFieldExpression(config, field, shipmentAlias);
+  return fieldReferenceForSort(config, field, shipmentAlias);
+}
+
+export async function listEntityFilterOptions(
+  config: EntityConfig,
+  searchParams: URLSearchParams,
+) {
+  const field = searchParams.get("field")?.trim() ?? "";
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  const fieldConfig = config.listFields.find((item) => item.key === field);
+  if (!fieldConfig) return { options: [] as Array<{ value: string; count: number }> };
+
+  if (config.key === "purchase-orders" && field === "requestType") {
+    const params: Row = {};
+    const keywordClause = keyword ? "AND COALESCE(NULLIF(typeItem.requestType, ''), NULLIF(typeRequestItem.requestType, ''), NULLIF(typeRequest.requestType, ''), '整机') LIKE :optionKeyword" : "";
+    if (keyword) params.optionKeyword = `%${keyword}%`;
+    const rows = await queryRows<{ value: string; count: number }>(
+      `
+        SELECT value, COUNT(*) AS count
+        FROM (
+          SELECT purchase.purchaseOrderId,
+            COALESCE(NULLIF(typeItem.requestType, ''), NULLIF(typeRequestItem.requestType, ''), NULLIF(typeRequest.requestType, ''), '整机') AS value
+          FROM purchaseorders purchase
+          LEFT JOIN purchaseorderitems typeItem ON typeItem.purchaseOrderId = purchase.purchaseOrderId
+          LEFT JOIN requestitems typeRequestItem ON typeRequestItem.id = typeItem.requestItemId
+          LEFT JOIN requests typeRequest ON typeRequest.requestNo = COALESCE(typeItem.requestNo, typeRequestItem.requestNo)
+          WHERE 1 = 1 ${keywordClause}
+          GROUP BY purchase.purchaseOrderId, value
+        ) valuesList
+        GROUP BY value
+        ORDER BY value
+        LIMIT 500
+      `,
+      params,
+    );
+    return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
+  }
+
+  const displayOnlyFields = config.key === "shipments"
+    ? shipmentDisplayFields
+    : config.key === "service-fee-snapshots"
+      ? new Set(["receivingUnitCode", "payerCustomerCode"])
+      : financePartyEntityKeys.has(config.key)
+        ? partyCodeDisplayFields
+        : new Set<string>();
+  const shipmentAlias = config.key === "shipments" ? "shipment" : "";
+  const table = quoteIdentifier(config.table);
+  const tableSource = shipmentAlias ? `${table} AS ${shipmentAlias}` : table;
+  const reference = displayOnlyFields.has(field)
+    ? getEntityDisplayFieldExpression(config, field, shipmentAlias)
+    : getEntityFilterFieldExpression(config, field, shipmentAlias);
+  if (!reference) return { options: [] as Array<{ value: string; count: number }> };
+  const params: Row = {};
+  const whereParts = [`${reference} IS NOT NULL`, `TRIM(${reference}) <> ''`];
+  if (keyword) {
+    whereParts.push(`${reference} LIKE :optionKeyword`);
+    params.optionKeyword = `%${keyword}%`;
+  }
+  for (const filter of config.filters) {
+    if (filter.key === "keyword" || filter.key === field) continue;
+    const value = searchParams.get(filter.key)?.trim();
+    if (!value) continue;
+    if (config.key === "shipments" && filter.key === "countryCode") {
+      const countryExpression = getEntityDisplayFieldExpression(config, "countryCode", shipmentAlias);
+      if (countryExpression) {
+        whereParts.push(`${countryExpression} = UPPER(TRIM(SUBSTRING_INDEX(:option_countryCode, '-', 1)))`);
+        params.option_countryCode = value;
+      }
+      continue;
+    }
+    if (config.key === "shipments" && filter.key === "receiptStatus") {
+      whereParts.push(value === "received" ? `${shipmentAlias}.deliveredAt IS NOT NULL` : `${shipmentAlias}.deliveredAt IS NULL`);
+      continue;
+    }
+    if (filter.key === "countryCode") {
+      whereParts.push(`${getEntityFilterFieldExpression(config, filter.key, shipmentAlias)} = :option_${filter.key}`);
+      params[`option_${filter.key}`] = normalizeCountryCodeFilter(value);
+      continue;
+    }
+    if (!config.formFields.some((item) => item.key === filter.key)) continue;
+    whereParts.push(`${shipmentAlias ? `${shipmentAlias}.` : ""}${quoteIdentifier(filter.key)} = :option_${filter.key}`);
+    params[`option_${filter.key}`] = value;
+  }
+  for (const candidate of config.listFields) {
+    if (candidate.key === field) continue;
+    const values = Array.from(new Set(searchParams.getAll(`filter.${candidate.key}`).map((value) => value.trim()).filter(Boolean)));
+    if (!values.length) continue;
+    const candidateReference = displayOnlyFields.has(candidate.key)
+      ? getEntityDisplayFieldExpression(config, candidate.key, shipmentAlias)
+      : getEntityFilterFieldExpression(config, candidate.key, shipmentAlias);
+    if (!candidateReference) continue;
+    const parameterName = `candidate_${candidate.key.replace(/[^a-zA-Z0-9_]/g, "_")}`;
+    whereParts.push(`${candidateReference} IN (:${parameterName})`);
+    params[parameterName] = values;
+  }
+  const selectedValues = searchParams.getAll("selected").map((value) => value.trim()).filter(Boolean);
+  if (selectedValues.length) {
+    whereParts.push(`${reference} IN (:selectedValues)`);
+    params.selectedValues = selectedValues;
+  }
+  const rows = await queryRows<{ value: string; count: number }>(
+    `SELECT ${reference} AS value, COUNT(*) AS count FROM ${tableSource} WHERE ${whereParts.join(" AND ")} GROUP BY ${reference} ORDER BY value LIMIT 500`,
+    params,
+  );
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
+}
+
+function getEntityDisplayFieldExpression(config: EntityConfig, field: string, shipmentAlias = "") {
+  const source = shipmentAlias ? `${shipmentAlias}.` : `${quoteIdentifier(config.table)}.`;
+  if (config.key === "service-fee-snapshots") {
+    if (field === "receivingUnitCode") {
+      return `(SELECT unit.undertakingUnitCode FROM undertakingunits unit WHERE unit.undertakingUnitId = ${source}receivingUnitId LIMIT 1)`;
+    }
+    if (field === "payerCustomerCode") {
+      return `(SELECT customer.customerCode FROM customers customer WHERE customer.customerId = ${source}payerCustomerId LIMIT 1)`;
+    }
+  }
+  if (config.key === "shipments") {
+    if (field === "countryCode") {
+      const linkedCountry = `(SELECT req.countryCode
+        FROM purchaseorderitems poi
+        LEFT JOIN requestitems ri ON ri.id = poi.requestItemId
+        LEFT JOIN requests req ON req.requestNo = COALESCE(NULLIF(poi.requestNo, ''), ri.requestNo)
+        WHERE (
+          poi.id = shipment.purchaseOrderItemId
+          OR (
+            NULLIF(shipment.poNo, '') IS NOT NULL
+            AND NULLIF(shipment.deviceCode, '') IS NOT NULL
+            AND poi.poNo = shipment.poNo
+            AND ri.deviceCode = shipment.deviceCode
+          )
+        )
+        ORDER BY (poi.id = shipment.purchaseOrderItemId) DESC, poi.id DESC
+        LIMIT 1)`;
+      return `UPPER(TRIM(SUBSTRING_INDEX(${linkedCountry}, '-', 1)))`;
+    }
+    if (field === "dcNameZh") return `(SELECT dc.nameZh FROM datacenters dc WHERE dc.dcCode = shipment.dcCode LIMIT 1)`;
+    if (field === "destinationAddress") return `(SELECT location.fullAddress FROM deliverylocations location WHERE location.locationId = shipment.destinationLocationId LIMIT 1)`;
+    if (field === "recipientName") return `(SELECT contact.name FROM deliverycontacts contact WHERE contact.contactId = shipment.recipientContactId LIMIT 1)`;
+    if (["supplierCode", "undertakingUnitCode", "customerCode"].includes(field)) {
+      const idField = field === "supplierCode" ? "supplierId" : field === "undertakingUnitCode" ? "undertakingUnitId" : "customerId";
+      const tableName = field === "supplierCode" ? "suppliers" : field === "undertakingUnitCode" ? "undertakingunits" : "customers";
+      const idColumn = field === "supplierCode" ? "supplierId" : field === "undertakingUnitCode" ? "undertakingUnitId" : "customerId";
+      const codeColumn = field;
+      return `(SELECT party.${codeColumn} FROM ${tableName} party INNER JOIN purchaseorderitems poi ON poi.poNo = shipment.poNo LEFT JOIN requestitems ri ON ri.id = poi.requestItemId WHERE (poi.id = shipment.purchaseOrderItemId OR (NULLIF(shipment.deviceCode, '') IS NOT NULL AND ri.deviceCode = shipment.deviceCode)) AND party.${idColumn} = ri.${idField} ORDER BY (poi.id = shipment.purchaseOrderItemId) DESC LIMIT 1)`;
+    }
+  }
+  if (partyCodeDisplayFields.has(field)) {
+    const idField = field === "supplierCode" ? "supplierId" : field === "undertakingUnitCode" ? "undertakingUnitId" : "customerId";
+    const tableName = field === "supplierCode" ? "suppliers" : field === "undertakingUnitCode" ? "undertakingunits" : "customers";
+    return `(SELECT party.${field} FROM ${tableName} party WHERE party.${idField} = ${source}${idField} LIMIT 1)`;
+  }
+  return "";
+}
+
+function filterableFieldReference(config: EntityConfig, field: string, shipmentAlias = "") {
+  return shipmentAlias ? `${shipmentAlias}.${quoteIdentifier(field)}` : `${quoteIdentifier(config.table)}.${quoteIdentifier(field)}`;
+}
+
+function getEntityFilterFieldExpression(config: EntityConfig, field: string, shipmentAlias = "") {
+  const reference = filterableFieldReference(config, field, shipmentAlias);
+  const fieldConfig = config.listFields.find((item) => item.key === field);
+  if (field === "countryCode") return normalizeCountryExpression(reference);
+  return fieldConfig?.type === "date" || fieldConfig?.type === "datetime"
+    ? formatTableDateExpression(reference)
+    : reference;
+}
+
+function normalizeCountryExpression(reference: string) {
+  return `UPPER(TRIM(SUBSTRING_INDEX(${reference}, '-', 1)))`;
 }
 
 function getBatchOrderBy(batchName: string, tieBreakers: string) {

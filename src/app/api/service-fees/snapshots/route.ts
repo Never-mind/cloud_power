@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServiceFeeStatementDraft, listServiceFeeStatements } from "@/lib/service-fee-service";
+import { createServiceFeeStatementDraft, listServiceFeeStatementFilterOptions, listServiceFeeStatements } from "@/lib/service-fee-service";
 
 export async function GET(request: NextRequest) {
   try {
+    if (request.nextUrl.searchParams.get("field")) {
+      return NextResponse.json(await listServiceFeeStatementFilterOptions(request.nextUrl.searchParams));
+    }
     return NextResponse.json(await listServiceFeeStatements(request.nextUrl.searchParams));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "服务费对账单加载失败" }, { status: 400 });

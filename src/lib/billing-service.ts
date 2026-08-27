@@ -2,6 +2,7 @@ import { execute, queryRows, type Row } from "./db";
 import { attachPartyCodes } from "./party-display";
 import { regenerateInternalServiceLedger } from "./internal-service-fee-service";
 import { DEFAULT_PAGE_SIZE, normalizePageSize } from "./pagination";
+import { appendTableFilterOptionConditions, appendTableInFilter, formatTableDateExpression, getTableFilterOptionsOrderBy, getTableSort, listSqlFilterOptions } from "./table-query";
 import {
   applyBillingAdjustments,
   buildBillingLedgerDraft,
@@ -63,6 +64,16 @@ export async function listBillingAdjustments(searchParams: URLSearchParams) {
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
   const whereParts: string[] = [];
   const params: Row = {};
+  const filterExpressions: Record<string, string> = {
+    adjustmentNo: "ba.adjustmentNo", instanceContractNo: "ba.instanceContractNo", status: "ba.status", itemCount: "ba.itemCount",
+    countryCode: "bai.countryCode", batchName: "bai.batchName", deviceCode: "bai.deviceCode", reason: "ba.reason",
+  };
+  const sortExpressions: Record<string, string> = {
+    ...filterExpressions,
+    itemCount: "COUNT(bai.id)", countryCode: "MIN(bai.countryCode)", batchName: "MIN(bai.batchName)", deviceCode: "MIN(bai.deviceCode)",
+    confirmedAt: "ba.confirmedAt", createdAt: "ba.createdAt", updatedAt: "ba.updatedAt",
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(whereParts, params, expression, field, searchParams, "billingAdjustment");
 
   if (keyword) {
     whereParts.push(
@@ -101,13 +112,29 @@ export async function listBillingAdjustments(searchParams: URLSearchParams) {
         DATE_FORMAT(ba.createdAt, '%Y-%m-%d') AS createdAt,
         DATE_FORMAT(ba.updatedAt, '%Y-%m-%d') AS updatedAt
       ${groupedFrom}
-      ORDER BY ba.createdAt DESC
+      ${getTableSort(searchParams, sortExpressions) || "ORDER BY ba.createdAt DESC"}
       LIMIT :limit OFFSET :offset
     `,
     { ...params, limit: pageSize, offset: (page - 1) * pageSize },
   );
 
   return { rows, total, page, pageSize, totalPages };
+}
+
+export async function listBillingAdjustmentFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    adjustmentNo: "ba.adjustmentNo", instanceContractNo: "ba.instanceContractNo", status: "ba.status", countryCode: "bai.countryCode", batchName: "bai.batchName", deviceCode: "bai.deviceCode", reason: "ba.reason",
+  };
+  const field = searchParams.get("field")?.trim() ?? "";
+  const expression = expressions[field];
+  if (!expression) return { options: [] as Array<{ value: string; count: number }> };
+  const params: Row = {};
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  const where = [`${expression} IS NOT NULL`, `TRIM(CAST(${expression} AS CHAR)) <> ''`];
+  if (keyword) { where.push(`${expression} LIKE :optionKeyword`); params.optionKeyword = `%${keyword}%`; }
+  appendTableFilterOptionConditions(where, params, expressions, searchParams, field);
+  const rows = await queryRows<{ value: string; count: number }>(`SELECT ${expression} AS value, COUNT(*) AS count FROM billingadjustments ba LEFT JOIN billingadjustmentitems bai ON bai.adjustmentNo = ba.adjustmentNo WHERE ${where.join(" AND ")} GROUP BY ${expression} ORDER BY ${getTableFilterOptionsOrderBy(field, expression)} LIMIT 500`, params);
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
 }
 
 export async function getBillingAdjustment(adjustmentNo: string) {
@@ -227,6 +254,7 @@ export async function listAvailableBillingLines(options: {
   countryCode?: string;
   purchaseOrderItemIds?: string[];
   requestType?: string;
+  searchParams?: URLSearchParams;
 } = {}) {
   const requestedPage = Math.max(1, Math.floor(Number(options.page ?? 1) || 1));
   const conditions = [
@@ -248,6 +276,18 @@ export async function listAvailableBillingLines(options: {
     conditions.push("(req.countryCode LIKE :keyword OR req.batchName LIKE :keyword OR COALESCE(poi.requestNo, po.requestNo, ri.requestNo) LIKE :keyword OR poi.poNo LIKE :keyword OR ri.deviceCode LIKE :keyword OR im.modelCode LIKE :keyword OR im.nameEn LIKE :keyword)");
     params.keyword = `%${options.keyword.trim()}%`;
   }
+  const filterExpressions: Record<string, string> = {
+    countryCode: "req.countryCode", batchName: "req.batchName", requestNo: "COALESCE(poi.requestNo, po.requestNo, ri.requestNo)",
+    poNo: "poi.poNo", deviceCode: "ri.deviceCode", requestType: "COALESCE(NULLIF(poi.requestType, ''), NULLIF(ri.requestType, ''), NULLIF(req.requestType, ''), '整机')",
+    modelCode: "im.modelCode", nameEn: "im.nameEn", quantity: "ri.quantity", actualCurrency: "po.currency",
+    actualUnitPrice: "poi.unitPrice", taxExcludedUnitPrice: "COALESCE(poi.taxExcludedUnitPrice, poi.unitPrice, 0)", taxSurcharge: "COALESCE(poi.taxSurcharge, 0)",
+  };
+  if (options.searchParams) {
+    for (const [field, expression] of Object.entries(filterExpressions)) {
+      appendTableInFilter(conditions, params, expression, field, options.searchParams, "availableBilling");
+    }
+  }
+  const requestedSort = options.searchParams ? getTableSort(options.searchParams, filterExpressions) : "";
   const ids = Array.from(new Set((options.purchaseOrderItemIds ?? []).map(String).filter(Boolean)));
   // Browsing remains capped. Workflow commands fetch every explicit selection,
   // including IDs chosen from previous pages.
@@ -293,12 +333,7 @@ export async function listAvailableBillingLines(options: {
           po.status AS purchaseStatus,
           req.status AS requestStatus
         ${sourceFrom}
-        ORDER BY
-          CASE WHEN TRIM(COALESCE(req.batchName, '')) REGEXP '^[A-Za-z]+[[:space:]]*-[[:space:]]*[0-9]+$' THEN 0 ELSE 1 END,
-          CAST(SUBSTRING_INDEX(TRIM(req.batchName), '-', -1) AS UNSIGNED) DESC,
-          UPPER(TRIM(SUBSTRING_INDEX(TRIM(req.batchName), '-', 1))) ASC,
-          req.countryCode ASC,
-          poi.id
+        ${requestedSort || "ORDER BY CASE WHEN TRIM(COALESCE(req.batchName, '')) REGEXP '^[A-Za-z]+[[:space:]]*-[[:space:]]*[0-9]+$' THEN 0 ELSE 1 END, CAST(SUBSTRING_INDEX(TRIM(req.batchName), '-', -1) AS UNSIGNED) DESC, UPPER(TRIM(SUBSTRING_INDEX(TRIM(req.batchName), '-', 1))) ASC, req.countryCode ASC, poi.id"}
         LIMIT :limit OFFSET :offset
       `,
       { ...params, limit: pageSize, offset: (page - 1) * pageSize },
@@ -336,6 +371,31 @@ export async function listAvailableBillingLines(options: {
       };
     });
   return { rows: await attachPartyCodes(availableLines), total, page, pageSize, totalPages };
+}
+
+export async function listAvailableBillingLineFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    countryCode: "req.countryCode", batchName: "req.batchName", requestNo: "COALESCE(poi.requestNo, po.requestNo, ri.requestNo)",
+    poNo: "poi.poNo", deviceCode: "ri.deviceCode", requestType: "COALESCE(NULLIF(poi.requestType, ''), NULLIF(ri.requestType, ''), NULLIF(req.requestType, ''), '整机')",
+    modelCode: "im.modelCode", nameEn: "im.nameEn", quantity: "ri.quantity", actualCurrency: "po.currency",
+    actualUnitPrice: "poi.unitPrice", taxExcludedUnitPrice: "COALESCE(poi.taxExcludedUnitPrice, poi.unitPrice, 0)", taxSurcharge: "COALESCE(poi.taxSurcharge, 0)",
+  };
+  return listSqlFilterOptions({
+    expressions,
+    searchParams,
+    from: `purchaseorderitems poi
+      LEFT JOIN purchaseorders po ON po.purchaseOrderId = poi.purchaseOrderId OR (poi.purchaseOrderId IS NULL AND po.poNo = poi.poNo)
+      LEFT JOIN requestitems ri ON ri.id = poi.requestItemId
+      LEFT JOIN requests req ON req.requestNo = COALESCE(poi.requestNo, po.requestNo, ri.requestNo)
+      LEFT JOIN instancemodels im ON im.deviceCode = ri.deviceCode`,
+    conditions: [
+      "po.status LIKE :availablePurchaseStatus",
+      "req.status <> :availableRequestDraftStatus",
+      "NOT EXISTS (SELECT 1 FROM billinginstanceledgers occupied WHERE occupied.purchaseOrderItemId = poi.id)",
+      "COALESCE(NULLIF(poi.requestType, ''), NULLIF(ri.requestType, ''), NULLIF(req.requestType, ''), '整机') <> :availableSparePartType",
+    ],
+    params: { availablePurchaseStatus: "%确认%", availableRequestDraftStatus: "草稿", availableSparePartType: "备件" },
+  });
 }
 
 export async function confirmBillingLedgers({
@@ -462,6 +522,14 @@ export async function listMonthlyBillingWriteOffs(searchParams: URLSearchParams)
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
   const whereParts: string[] = [];
   const params: Row = {};
+  const filterExpressions: Record<string, string> = {
+    writeOffMonth: formatTableDateExpression("mbw.writeOffMonth"), countryCode: "mbw.countryCode", batchName: "mbw.batchName",
+    requestNo: "mbw.requestNo", poNo: "mbw.poNo", deviceCode: "mbw.deviceCode", requestType: "mbw.requestType",
+    modelCode: "mbw.modelCode", nameEn: "mbw.nameEn", quantity: "mbw.quantity", instanceContractNo: "mbw.instanceContractNo",
+    currency: "mbw.currency", monthlyAmount: "mbw.monthlyAmount", monthlyTotalAmount: "mbw.monthlyTotalAmount",
+    stage: "mbw.stage", sourceType: "mbw.sourceType", adjustmentNo: "mbw.adjustmentNo",
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(whereParts, params, expression, field, searchParams, "monthlyBilling");
 
   if (keyword) {
     whereParts.push(
@@ -555,12 +623,7 @@ export async function listMonthlyBillingWriteOffs(searchParams: URLSearchParams)
         ON riByBusinessKey.keyRequestNo = mbw.requestNo
         AND riByBusinessKey.keyDeviceCode = mbw.deviceCode
       ${where}
-      ORDER BY
-        mbw.writeOffMonth DESC,
-        CASE WHEN TRIM(COALESCE(mbw.batchName, '')) REGEXP '^[A-Za-z]+[[:space:]]*-[[:space:]]*[0-9]+$' THEN 0 ELSE 1 END,
-        CAST(SUBSTRING_INDEX(TRIM(mbw.batchName), '-', -1) AS UNSIGNED) DESC,
-        UPPER(TRIM(SUBSTRING_INDEX(TRIM(mbw.batchName), '-', 1))) ASC,
-        mbw.ledgerId
+      ${getTableSort(searchParams, filterExpressions) || "ORDER BY mbw.writeOffMonth DESC, mbw.ledgerId"}
       ${exportAll ? "" : "LIMIT :limit OFFSET :offset"}
     `,
     params,
@@ -574,6 +637,29 @@ export async function listMonthlyBillingWriteOffs(searchParams: URLSearchParams)
     pageSize,
     totalPages,
   };
+}
+
+export async function listMonthlyBillingWriteOffFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    writeOffMonth: formatTableDateExpression("writeOffMonth"), countryCode: "countryCode", batchName: "batchName", requestNo: "requestNo", poNo: "poNo",
+    deviceCode: "deviceCode", requestType: "requestType", modelCode: "modelCode", nameEn: "nameEn", quantity: "quantity",
+    instanceContractNo: "instanceContractNo", currency: "currency", monthlyAmount: "monthlyAmount", monthlyTotalAmount: "monthlyTotalAmount",
+    stage: "stage", sourceType: "sourceType", adjustmentNo: "adjustmentNo",
+  };
+  return listTableOptions("monthlybillingwriteoffs", expressions, searchParams);
+}
+
+async function listTableOptions(table: string, expressions: Record<string, string>, searchParams: URLSearchParams) {
+  const field = searchParams.get("field")?.trim() ?? "";
+  const expression = expressions[field];
+  if (!expression) return { options: [] as Array<{ value: string; count: number }> };
+  const params: Row = {};
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  const where = [`${expression} IS NOT NULL`, `TRIM(CAST(${expression} AS CHAR)) <> ''`];
+  if (keyword) { where.push(`${expression} LIKE :optionKeyword`); params.optionKeyword = `%${keyword}%`; }
+  appendTableFilterOptionConditions(where, params, expressions, searchParams, field);
+  const rows = await queryRows<{ value: string; count: number }>(`SELECT ${expression} AS value, COUNT(*) AS count FROM ${table} WHERE ${where.join(" AND ")} GROUP BY ${expression} ORDER BY ${getTableFilterOptionsOrderBy(field, expression)} LIMIT 500`, params);
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
 }
 
 export async function confirmBillingAdjustment(adjustmentNo: string) {

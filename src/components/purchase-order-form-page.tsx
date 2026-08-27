@@ -10,6 +10,7 @@ import { calculatePurchaseTotalAmount } from "@/lib/purchase-lines";
 import { buildAutoPurchaseOrderId, buildAutoPurchaseOrderNo, normalizeRequestNos } from "@/lib/procurement-workflow";
 import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
 import { Button, Input, Panel } from "./ui";
+import { StickyTable } from "./sticky-table";
 
 type Row = Record<string, string | number | boolean | null>;
 
@@ -244,7 +245,7 @@ export function PurchaseOrderFormPage() {
             新增明细
           </Button>
         </div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="purchase-order-form-details">
           <table className="min-w-[1900px] whitespace-nowrap border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -315,7 +316,7 @@ export function PurchaseOrderFormPage() {
               })}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
       </Panel>
     </div>
   );

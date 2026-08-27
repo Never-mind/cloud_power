@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PoolConnection } from "mysql2/promise";
 import { execute, executeInTransaction, queryRows, queryRowsInTransaction, type Row, withTransaction } from "./db";
+import { appendTableInFilter, formatTableDateExpression, getTableSort, listSqlFilterOptions } from "./table-query";
 
 const DRAFT = "\u8349\u7a3f";
 const CONFIRMED = "\u5df2\u786e\u8ba4";
@@ -67,24 +68,20 @@ function validateScope(countryCode: unknown, currency: unknown, periodStart: unk
   return { country, settlementCurrency, start, end };
 }
 
-async function findAvailableSources({
+function buildAvailableSourceQuery({
   countryCode,
   currency,
   periodStart,
   periodEnd,
   settlementNos,
-  connection,
-  page,
-  pageSize,
+  searchParams,
 }: {
   countryCode: string;
   currency: string;
   periodStart: string;
   periodEnd: string;
   settlementNos?: string[];
-  connection?: PoolConnection;
-  page?: number;
-  pageSize?: number;
+  searchParams?: URLSearchParams;
 }) {
   const params: Row = { confirmed: CONFIRMED, voided: VOIDED, countryCode, currency, periodStart, periodEnd };
   const conditions = [
@@ -104,6 +101,36 @@ async function findAvailableSources({
     Object.assign(params, selected.params);
     conditions.push(`source.settlementNo IN (${selected.placeholders})`);
   }
+  const filterExpressions: Record<string, string> = {
+    settlementNo: "source.settlementNo", title: "source.title", itemTypes: "(SELECT GROUP_CONCAT(DISTINCT itemType ORDER BY itemType SEPARATOR ', ') FROM balancesettlementitems itemFilter WHERE itemFilter.settlementNo = source.settlementNo)", countryCode: "source.countryCode", currency: "source.currency", periodStart: formatTableDateExpression("source.periodStart"), periodEnd: formatTableDateExpression("source.periodEnd"),
+    itemCount: "source.itemCount", capexDifferenceTotal: "source.capexDifferenceTotal", opexDifferenceTotal: "source.opexDifferenceTotal", differenceTotal: "source.differenceTotal",
+  };
+  if (searchParams) for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(conditions, params, expression, field, searchParams, "balanceSource");
+  return { params, conditions, filterExpressions };
+}
+
+async function findAvailableSources({
+  countryCode,
+  currency,
+  periodStart,
+  periodEnd,
+  settlementNos,
+  connection,
+  page,
+  pageSize,
+  searchParams,
+}: {
+  countryCode: string;
+  currency: string;
+  periodStart: string;
+  periodEnd: string;
+  settlementNos?: string[];
+  connection?: PoolConnection;
+  page?: number;
+  pageSize?: number;
+  searchParams?: URLSearchParams;
+}) {
+  const { params, conditions, filterExpressions } = buildAvailableSourceQuery({ countryCode, currency, periodStart, periodEnd, settlementNos, searchParams });
   const sql =
     `
       SELECT source.settlementNo, source.title, source.countryCode, source.currency, source.periodStart, source.periodEnd,
@@ -114,7 +141,7 @@ async function findAvailableSources({
       WHERE ${conditions.join(" AND ")}
       GROUP BY source.settlementNo, source.title, source.countryCode, source.currency, source.periodStart, source.periodEnd,
                source.itemCount, source.capexDifferenceTotal, source.opexDifferenceTotal, source.differenceTotal
-      ORDER BY source.confirmedAt DESC, source.createdAt DESC
+      ${searchParams ? (getTableSort(searchParams, filterExpressions) || "ORDER BY source.confirmedAt DESC, source.createdAt DESC") : "ORDER BY source.confirmedAt DESC, source.createdAt DESC"}
       ${page && pageSize ? "LIMIT :limit OFFSET :offset" : ""}
     `;
   if (page && pageSize) {
@@ -133,15 +160,14 @@ export async function listAvailableFinalSettlementSources(input: {
   periodEnd?: string;
   page?: number;
   pageSize?: number;
+  searchParams?: URLSearchParams;
 }) {
   const scope = validateScope(input.countryCode, input.currency, input.periodStart, input.periodEnd);
   const pageSize = Math.min(100, Math.max(1, Math.floor(numberValue(input.pageSize ?? 20))));
+  const countQuery = buildAvailableSourceQuery({ countryCode: scope.country, currency: scope.settlementCurrency, periodStart: scope.start, periodEnd: scope.end, searchParams: input.searchParams });
   const [{ total: totalValue }] = await queryRows<{ total: number }>(
-    `SELECT COUNT(*) AS total FROM balancesettlements source
-      WHERE source.status = :confirmed AND source.countryCode = :countryCode AND source.currency = :currency
-        AND source.periodStart = :periodStart AND source.periodEnd = :periodEnd
-        AND NOT EXISTS (SELECT 1 FROM balancesettlementfinalsources reserved INNER JOIN balancesettlementfinals finalSettlement ON finalSettlement.finalSettlementNo = reserved.finalSettlementNo WHERE reserved.sourceSettlementNo = source.settlementNo AND finalSettlement.status <> :voided)`,
-    { confirmed: CONFIRMED, voided: VOIDED, countryCode: scope.country, currency: scope.settlementCurrency, periodStart: scope.start, periodEnd: scope.end },
+    `SELECT COUNT(*) AS total FROM balancesettlements source WHERE ${countQuery.conditions.join(" AND ")}`,
+    countQuery.params,
   );
   const total = Number(totalValue ?? 0);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -153,8 +179,32 @@ export async function listAvailableFinalSettlementSources(input: {
     periodEnd: scope.end,
     page,
     pageSize,
+    searchParams: input.searchParams,
   });
   return { rows, total, page, pageSize, totalPages };
+}
+
+export async function listAvailableFinalSettlementSourceFilterOptions(input: {
+  countryCode: string;
+  currency: string;
+  periodStart: string;
+  periodEnd: string;
+  searchParams: URLSearchParams;
+}) {
+  const scope = validateScope(input.countryCode, input.currency, input.periodStart, input.periodEnd);
+  const expressions: Record<string, string> = {
+    settlementNo: "source.settlementNo", title: "source.title", itemTypes: "(SELECT GROUP_CONCAT(DISTINCT itemType ORDER BY itemType SEPARATOR ', ') FROM balancesettlementitems itemFilter WHERE itemFilter.settlementNo = source.settlementNo)", countryCode: "source.countryCode", currency: "source.currency", periodStart: formatTableDateExpression("source.periodStart"), periodEnd: formatTableDateExpression("source.periodEnd"), itemCount: "source.itemCount", capexDifferenceTotal: "source.capexDifferenceTotal", opexDifferenceTotal: "source.opexDifferenceTotal", differenceTotal: "source.differenceTotal",
+  };
+  return listSqlFilterOptions({
+    expressions,
+    searchParams: input.searchParams,
+    from: "balancesettlements source",
+    conditions: [
+      "source.status = :confirmed", "source.countryCode = :countryCode", "source.currency = :currency", "source.periodStart = :periodStart", "source.periodEnd = :periodEnd",
+      "NOT EXISTS (SELECT 1 FROM balancesettlementfinalsources reserved INNER JOIN balancesettlementfinals finalSettlement ON finalSettlement.finalSettlementNo = reserved.finalSettlementNo WHERE reserved.sourceSettlementNo = source.settlementNo AND finalSettlement.status <> :voided)",
+    ],
+    params: { confirmed: CONFIRMED, voided: VOIDED, countryCode: scope.country, currency: scope.settlementCurrency, periodStart: scope.start, periodEnd: scope.end },
+  });
 }
 
 export async function createFinalBalanceSettlement({
@@ -271,6 +321,7 @@ export async function listFinalBalanceSettlements({
   keyword = "",
   page = 1,
   pageSize = 20,
+  searchParams,
 }: {
   countryCode?: string;
   currency?: string;
@@ -278,6 +329,7 @@ export async function listFinalBalanceSettlements({
   keyword?: string;
   page?: number;
   pageSize?: number;
+  searchParams?: URLSearchParams;
 }) {
   const conditions: string[] = [];
   const params: Row = {};
@@ -288,6 +340,10 @@ export async function listFinalBalanceSettlements({
     conditions.push("(finalSettlementNo LIKE :keyword OR title LIKE :keyword OR notes LIKE :keyword)");
     params.keyword = `%${text(keyword)}%`;
   }
+  const filterExpressions: Record<string, string> = {
+    finalSettlementNo: "finalSettlementNo", title: "title", countryCode: "countryCode", currency: "currency", periodStart: formatTableDateExpression("periodStart"), periodEnd: formatTableDateExpression("periodEnd"), status: "status", sourceCount: "sourceCount", itemCount: "itemCount", capexDifferenceTotal: "capexDifferenceTotal", opexDifferenceTotal: "opexDifferenceTotal", differenceTotal: "differenceTotal", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  if (searchParams) for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(conditions, params, expression, field, searchParams, "balanceFinal");
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const [{ total: totalValue }] = await queryRows<{ total: number }>(`SELECT COUNT(*) AS total FROM balancesettlementfinals ${where}`, params);
   const total = Number(totalValue ?? 0);
@@ -295,10 +351,17 @@ export async function listFinalBalanceSettlements({
   const totalPages = Math.max(1, Math.ceil(total / safePageSize));
   const safePage = Math.min(Math.max(1, Math.floor(numberValue(page))), totalPages);
   const rows = await queryRows<Row>(
-    `SELECT * FROM balancesettlementfinals ${where} ORDER BY createdAt DESC LIMIT :limit OFFSET :offset`,
+    `SELECT * FROM balancesettlementfinals ${where} ${searchParams ? (getTableSort(searchParams, filterExpressions) || "ORDER BY createdAt DESC") : "ORDER BY createdAt DESC"} LIMIT :limit OFFSET :offset`,
     { ...params, limit: safePageSize, offset: (safePage - 1) * safePageSize },
   );
   return { rows, total, page: safePage, pageSize: safePageSize, totalPages };
+}
+
+export async function listFinalBalanceSettlementFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    finalSettlementNo: "finalSettlementNo", title: "title", countryCode: "countryCode", currency: "currency", periodStart: formatTableDateExpression("periodStart"), periodEnd: formatTableDateExpression("periodEnd"), status: "status", sourceCount: "sourceCount", itemCount: "itemCount", capexDifferenceTotal: "capexDifferenceTotal", opexDifferenceTotal: "opexDifferenceTotal", differenceTotal: "differenceTotal", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  return listSqlFilterOptions({ from: "balancesettlementfinals", expressions, searchParams });
 }
 
 export async function getFinalBalanceSettlement(finalSettlementNo: string) {

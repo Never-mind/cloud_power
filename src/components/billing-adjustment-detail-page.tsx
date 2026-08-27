@@ -14,6 +14,7 @@ import { PURCHASE_CURRENCY_OPTIONS } from "@/lib/purchase-order-form";
 import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
 import { buildDetailRoute, getReturnTo } from "@/lib/client-list-navigation";
 import { Button, Input, Panel, Textarea } from "./ui";
+import { StickyTable } from "./sticky-table";
 
 type Row = Record<string, string | number | boolean | null>;
 
@@ -270,7 +271,7 @@ export function BillingAdjustmentDetailPage({ adjustmentNo: routeAdjustmentNo }:
           )}
         </div>
 
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="billing-adjustment-detail-items">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -333,7 +334,7 @@ export function BillingAdjustmentDetailPage({ adjustmentNo: routeAdjustmentNo }:
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <datalist id="billing-adjustment-device-codes">
           {instanceModels.map((model) => (
             <option key={model.deviceCode} value={model.deviceCode}>

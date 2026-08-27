@@ -4,7 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Calculator, CheckCircle2, Download, Plus, RefreshCw, Search, XCircle } from "lucide-react";
 import { exportRowsToXlsx } from "@/lib/client-xlsx-export";
 import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
+import { fetchTableFilterOptions } from "@/lib/table-query-client";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableSortOrder } from "./table-column-menu";
 import { Button, Input, Panel } from "./ui";
 
 type Value = string | number | boolean | null | undefined;
@@ -173,6 +176,12 @@ export function BalanceSettlementPage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showFormula, setShowFormula] = useState(false);
+  const [candidateSortField, setCandidateSortField] = useState("");
+  const [candidateSortOrder, setCandidateSortOrder] = useState<TableSortOrder>("");
+  const [candidateFilters, setCandidateFilters] = useState<Record<string, string[]>>({});
+  const [settlementSortField, setSettlementSortField] = useState("");
+  const [settlementSortOrder, setSettlementSortOrder] = useState<TableSortOrder>("");
+  const [settlementFilters, setSettlementFilters] = useState<Record<string, string[]>>({});
 
   const versionOptions = useMemo(
     () => versions.filter((version) => !candidateCountry || version.countryCode === candidateCountry),
@@ -197,13 +206,15 @@ export function BalanceSettlementPage() {
     }
   }
 
-  async function loadCandidates(page = candidatePage, pageSize = candidatePageSize) {
+  async function loadCandidates(page = candidatePage, pageSize = candidatePageSize, queryState = { sortField: candidateSortField, sortOrder: candidateSortOrder, filters: candidateFilters }) {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
       if (candidateCountry) params.set("countryCode", candidateCountry);
       if (pricingVersionId) params.set("pricingVersionId", pricingVersionId);
       if (candidateKeyword.trim()) params.set("keyword", candidateKeyword.trim());
+      if (queryState.sortField && queryState.sortOrder) { params.set("sortField", queryState.sortField); params.set("sortOrder", queryState.sortOrder); }
+      for (const [field, values] of Object.entries(queryState.filters)) for (const value of values) params.append(`filter.${field}`, value);
       const data = await fetchJson<{ rows: Candidate[]; total: number; page: number; pageSize: number }>(`/api/balance-settlements/available?${params}`);
       setCandidates(data.rows ?? []);
       setSelectedCandidateRows((current) => {
@@ -223,13 +234,15 @@ export function BalanceSettlementPage() {
     }
   }
 
-  async function loadSettlements(page = settlementPage, pageSize = settlementPageSize) {
+  async function loadSettlements(page = settlementPage, pageSize = settlementPageSize, queryState = { sortField: settlementSortField, sortOrder: settlementSortOrder, filters: settlementFilters }) {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
       if (settlementCountry) params.set("countryCode", settlementCountry);
       if (settlementStatus) params.set("status", settlementStatus);
       if (settlementKeyword.trim()) params.set("keyword", settlementKeyword.trim());
+      if (queryState.sortField && queryState.sortOrder) { params.set("sortField", queryState.sortField); params.set("sortOrder", queryState.sortOrder); }
+      for (const [field, values] of Object.entries(queryState.filters)) for (const value of values) params.append(`filter.${field}`, value);
       const data = await fetchJson<{ rows: Settlement[]; total: number; page: number; pageSize: number }>(`/api/balance-settlements?${params}`);
       setSettlements(data.rows ?? []);
       setSettlementTotal(Number(data.total ?? 0));
@@ -240,6 +253,20 @@ export function BalanceSettlementPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function updateCandidateQuery(key: string, next: { order?: TableSortOrder; values?: string[] }) {
+    const state = { sortField: next.order !== undefined ? (next.order ? key : "") : candidateSortField, sortOrder: next.order ?? candidateSortOrder, filters: next.values ? { ...candidateFilters, [key]: next.values } : candidateFilters };
+    setCandidateSortField(state.sortField); setCandidateSortOrder(state.sortOrder); setCandidateFilters(state.filters); setCandidatePage(1); void loadCandidates(1, candidatePageSize, state);
+  }
+
+  function updateSettlementQuery(key: string, next: { order?: TableSortOrder; values?: string[] }) {
+    const state = { sortField: next.order !== undefined ? (next.order ? key : "") : settlementSortField, sortOrder: next.order ?? settlementSortOrder, filters: next.values ? { ...settlementFilters, [key]: next.values } : settlementFilters };
+    setSettlementSortField(state.sortField); setSettlementSortOrder(state.sortOrder); setSettlementFilters(state.filters); setSettlementPage(1); void loadSettlements(1, settlementPageSize, state);
+  }
+
+  function columnMenu(key: string, label: string, state: { sortField: string; sortOrder: TableSortOrder; filters: Record<string, string[]> }, endpoint: string, update: (key: string, next: { order?: TableSortOrder; values?: string[] }) => void, extraParams: Record<string, string> = {}) {
+    return <TableColumnMenu column={{ key, label, sortable: true, filterable: true }} sortOrder={state.sortField === key ? state.sortOrder : ""} filterValues={state.filters[key] ?? []} loadOptions={(keyword) => fetchTableFilterOptions(endpoint, key, keyword, extraParams, state.filters)} onSort={(order) => update(key, { order })} onFilter={(values) => update(key, { values })} />;
   }
 
   useEffect(() => { void loadReferenceData(); }, []);
@@ -393,13 +420,11 @@ export function BalanceSettlementPage() {
               <Button tone="primary" onClick={() => void loadCandidates(1)}><Search size={15} />查询</Button>
               <Button onClick={() => void loadCandidates(1)}><RefreshCw size={15} />刷新</Button>
             </div>
-            <div className="table-scroll overflow-auto">
+            <StickyTable className="table-scroll overflow-auto" tableKey="balance-settlement-available">
               <table className="w-full min-w-[2060px] border-collapse text-sm">
                 <thead className="bg-[#f5f7fa] text-[#303133]"><tr>
                   <th className="w-12 border-b border-r border-[#ebeef5] px-3 py-3"><input type="checkbox" checked={allSelected} onChange={toggleAllCandidates} /></th>
-                  {[
-                    "国家", "批次", "需求单号", "PO单号", "实例编码", "机型", "英文名称", "承接单位", "供应商", "客户", "数量", "采购币种", "采购CAPEX单价", "采购OPEX单价", "结差汇率", "CAPEX锚定单价", "OPEX锚定单价", "CAPEX结差总额", "OPEX结差总额", "结差合计", "校验结果",
-                  ].map((label) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={label}>{label}</th>)}
+                  {[ ["countryCode", "国家"], ["batchName", "批次"], ["requestNo", "需求单号"], ["poNo", "PO单号"], ["deviceCode", "实例编码"], ["modelCode", "机型"], ["nameEn", "英文名称"], ["undertakingUnitCode", "承接单位"], ["supplierCode", "供应商"], ["customerCode", "客户"], ["quantity", "数量"], ["procurementCurrency", "采购币种"], ["capexUnitPrice", "采购CAPEX单价"], ["opexUnitPrice", "采购OPEX单价"], ["settlementRate", "结差汇率"], ["anchorCapexUnitPrice", "CAPEX锚定单价"], ["anchorOpexUnitPrice", "OPEX锚定单价"], ["capexDifferenceTotal", "CAPEX结差总额"], ["opexDifferenceTotal", "OPEX结差总额"], ["differenceTotal", "结差合计"], ["canGenerate", "校验结果"]].map(([key, label]) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={key}>{["countryCode", "batchName", "requestNo", "poNo", "deviceCode", "modelCode", "nameEn", "undertakingUnitCode", "supplierCode", "customerCode", "quantity", "procurementCurrency", "capexUnitPrice", "opexUnitPrice", "anchorCapexUnitPrice", "anchorOpexUnitPrice"].includes(key) ? columnMenu(key, label, { sortField: candidateSortField, sortOrder: candidateSortOrder, filters: candidateFilters }, "/api/balance-settlements/available", updateCandidateQuery, { pricingVersionId, countryCode: candidateCountry }) : label}</th>)}
                 </tr></thead>
                 <tbody>
                   {candidates.map((row) => {
@@ -421,7 +446,7 @@ export function BalanceSettlementPage() {
                   {!candidates.length && <tr><td className="py-12 text-center text-[#909399]" colSpan={18}>{loading ? "加载中..." : "暂无可生成的实例结差数据"}</td></tr>}
                 </tbody>
               </table>
-            </div>
+            </StickyTable>
             <PaginationBar page={candidatePage} pageSize={candidatePageSize} total={candidateTotal} onPageChange={(next) => void loadCandidates(next)} onPageSizeChange={(next) => void loadCandidates(1, next)} />
           </Panel>
 
@@ -448,7 +473,7 @@ export function BalanceSettlementPage() {
               <Button tone="primary" onClick={() => void loadSettlements()}><Search size={15} />查询</Button><Button onClick={() => void loadSettlements()}><RefreshCw size={15} />刷新</Button>
               <Button onClick={() => exportRows(SETTLEMENT_EXPORT_COLUMNS, settlements, "结差来源单.xlsx", "结差来源单")}><Download size={15} />导出</Button>
             </div>
-            <div className="table-scroll overflow-auto"><table className="w-full min-w-[1460px] border-collapse text-sm"><thead className="bg-[#f5f7fa] text-[#303133]"><tr>{["结差来源单号", "结差单名称", "来源类型", "国家", "锚定价格版本", "币种", "状态", "明细数量", "CAPEX结差总额", "OPEX结差总额", "结差合计", "确认日期", "创建日期", "更新日期"].map((label) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={label}>{label}</th>)}</tr></thead><tbody>
+            <StickyTable className="table-scroll overflow-auto" tableKey="balance-settlements"><table className="w-full min-w-[1460px] border-collapse text-sm"><thead className="bg-[#f5f7fa] text-[#303133]"><tr>{[["settlementNo", "结差来源单号"], ["title", "结差单名称"], ["itemTypes", "来源类型"], ["countryCode", "国家"], ["pricingVersionNo", "锚定价格版本"], ["currency", "币种"], ["status", "状态"], ["itemCount", "明细数量"], ["capexDifferenceTotal", "CAPEX结差总额"], ["opexDifferenceTotal", "OPEX结差总额"], ["differenceTotal", "结差合计"], ["confirmedAt", "确认日期"], ["createdAt", "创建日期"], ["updatedAt", "更新日期"]].map(([key, label]) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={key}>{columnMenu(key, label, { sortField: settlementSortField, sortOrder: settlementSortOrder, filters: settlementFilters }, "/api/balance-settlements", updateSettlementQuery)}</th>)}</tr></thead><tbody>
               {settlements.map((row) => <tr className="hover:bg-[#fafafa]" key={row.settlementNo}>
                 <td className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3"><button className="text-[#1890ff] hover:underline" onClick={() => void openSettlement(row.settlementNo)}>{row.settlementNo}</button></td>
                 {[["title"], ["itemTypes"], ["countryCode"], ["pricingVersionNo"], ["currency"]].map(([key]) => <td className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3" key={key}>{asText(row[key]) || "-"}</td>)}
@@ -458,7 +483,7 @@ export function BalanceSettlementPage() {
                 <td className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3">{formatDate(row.confirmedAt)}</td><td className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3">{formatDate(row.createdAt)}</td><td className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3">{formatDate(row.updatedAt)}</td>
               </tr>)}
               {!settlements.length && <tr><td className="py-12 text-center text-[#909399]" colSpan={15}>{loading ? "加载中..." : "暂无结差来源单"}</td></tr>}
-            </tbody></table></div>
+            </tbody></table></StickyTable>
             <PaginationBar page={settlementPage} pageSize={settlementPageSize} total={settlementTotal} onPageChange={(next) => void loadSettlements(next)} onPageSizeChange={(next) => void loadSettlements(1, next)} />
           </Panel>
           {detail && <SettlementDetailPanel detail={detail} saving={saving} onClose={() => setDetail(null)} onConfirm={() => void confirmSettlement()} onVoid={() => void voidSettlement()} />}
@@ -473,7 +498,7 @@ export function BalanceSettlementPage() {
 function SettlementDetailPanel({ detail, saving, onClose, onConfirm, onVoid }: { detail: SettlementDetail; saving: boolean; onClose: () => void; onConfirm: () => void; onVoid: () => void }) {
   const hasNonInstanceItems = detail.items.some((item) => asText(item.itemType) === "非实例费用");
   const columns = hasNonInstanceItems ? [...DETAIL_TABLE_COLUMNS, ...NON_INSTANCE_DETAIL_TABLE_COLUMNS] : DETAIL_TABLE_COLUMNS;
-  return <Panel className="overflow-hidden"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#ebeef5] p-4"><div><div className="flex items-center gap-2"><h2 className="font-medium text-[#303133]">结差单：{detail.master.settlementNo}</h2><span className={`rounded px-2 py-1 text-xs ${statusClass(detail.master.status)}`}>{asText(detail.master.status)}</span></div><p className="mt-1 text-sm text-[#909399]">{asText(detail.master.title)} · 锚定版本：{asText(detail.master.pricingVersionNo) || "手工结差"} · 创建日期：{formatDate(detail.master.createdAt)}</p></div><div className="flex flex-wrap gap-2"><Button onClick={() => exportRows(DETAIL_EXPORT_COLUMNS, detail.items, `${detail.master.settlementNo}-明细.xlsx`, "结差明细")}><Download size={15} />导出明细</Button>{detail.master.status === DRAFT && <Button tone="danger" disabled={saving} onClick={onVoid}><XCircle size={15} />作废草稿</Button>}{detail.master.status === DRAFT && <Button tone="success" disabled={saving} onClick={onConfirm}><CheckCircle2 size={15} />确认结差单</Button>}<Button onClick={onClose}>关闭</Button></div></div><div className="grid gap-px border-b border-[#ebeef5] bg-[#ebeef5] sm:grid-cols-4"><Metric label="明细数量" value={asNumber(detail.master.itemCount)} /><Metric label="CAPEX结差总额" value={formatMoney(detail.master.capexDifferenceTotal)} negative={isNegative(detail.master.capexDifferenceTotal)} /><Metric label="OPEX结差总额" value={formatMoney(detail.master.opexDifferenceTotal)} negative={isNegative(detail.master.opexDifferenceTotal)} /><Metric label="结差合计" value={formatMoney(detail.master.differenceTotal)} negative={isNegative(detail.master.differenceTotal)} /></div><div className="table-scroll overflow-auto"><table className={`w-full min-w-[${hasNonInstanceItems ? "3600" : "2360"}px] border-collapse text-sm`}><thead className="bg-[#f5f7fa]"><tr>{columns.map(([key, label]) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={key}>{label}</th>)}</tr></thead><tbody>{detail.items.map((item) => <tr key={asText(item.id)}>{columns.map(([key, , kind]) => <td className={`whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 ${key.toLowerCase().includes("difference") && isNegative(item[key]) ? "text-[#f56c6c]" : ""}`} key={key}>{formatValue(item[key], kind as "money" | "date" | "number")}</td>)}</tr>)}</tbody></table></div></Panel>;
+  return <Panel className="overflow-hidden"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#ebeef5] p-4"><div><div className="flex items-center gap-2"><h2 className="font-medium text-[#303133]">结差单：{detail.master.settlementNo}</h2><span className={`rounded px-2 py-1 text-xs ${statusClass(detail.master.status)}`}>{asText(detail.master.status)}</span></div><p className="mt-1 text-sm text-[#909399]">{asText(detail.master.title)} · 锚定版本：{asText(detail.master.pricingVersionNo) || "手工结差"} · 创建日期：{formatDate(detail.master.createdAt)}</p></div><div className="flex flex-wrap gap-2"><Button onClick={() => exportRows(DETAIL_EXPORT_COLUMNS, detail.items, `${detail.master.settlementNo}-明细.xlsx`, "结差明细")}><Download size={15} />导出明细</Button>{detail.master.status === DRAFT && <Button tone="danger" disabled={saving} onClick={onVoid}><XCircle size={15} />作废草稿</Button>}{detail.master.status === DRAFT && <Button tone="success" disabled={saving} onClick={onConfirm}><CheckCircle2 size={15} />确认结差单</Button>}<Button onClick={onClose}>关闭</Button></div></div><div className="grid gap-px border-b border-[#ebeef5] bg-[#ebeef5] sm:grid-cols-4"><Metric label="明细数量" value={asNumber(detail.master.itemCount)} /><Metric label="CAPEX结差总额" value={formatMoney(detail.master.capexDifferenceTotal)} negative={isNegative(detail.master.capexDifferenceTotal)} /><Metric label="OPEX结差总额" value={formatMoney(detail.master.opexDifferenceTotal)} negative={isNegative(detail.master.opexDifferenceTotal)} /><Metric label="结差合计" value={formatMoney(detail.master.differenceTotal)} negative={isNegative(detail.master.differenceTotal)} /></div><StickyTable className="table-scroll overflow-auto" tableKey={`balance-settlement-detail-${detail.master.settlementNo}`}><table className={`w-full min-w-[${hasNonInstanceItems ? "3600" : "2360"}px] border-collapse text-sm`}><thead className="bg-[#f5f7fa]"><tr>{columns.map(([key, label]) => <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={key}>{label}</th>)}</tr></thead><tbody>{detail.items.map((item) => <tr key={asText(item.id)}>{columns.map(([key, , kind]) => <td className={`whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 ${key.toLowerCase().includes("difference") && isNegative(item[key]) ? "text-[#f56c6c]" : ""}`} key={key}>{formatValue(item[key], kind as "money" | "date" | "number")}</td>)}</tr>)}</tbody></table></StickyTable></Panel>;
 }
 
 function InstanceFormulaDialog({ onClose }: { onClose: () => void }) {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execute, queryRows, type Row } from "./db";
+import { appendTableInFilter, formatTableDateExpression, getTableSort, listSqlFilterOptions } from "./table-query";
 
 export const CAPEX_PRICING_STATUSES = ["草稿", "已确认", "已废止"] as const;
 
@@ -415,6 +416,10 @@ export async function listCapexPricingVersions(searchParams: URLSearchParams) {
     whereParts.push("v.status = :status");
     params.status = status;
   }
+  const filterExpressions: Record<string, string> = {
+    versionNo: "v.versionNo", countryCode: "v.countryCode", effectiveDate: formatTableDateExpression("v.effectiveDate"), status: "v.status", itemCount: "(SELECT COUNT(*) FROM capexpricingitems iFilterCount WHERE iFilterCount.versionId = v.versionId)", sourceFileName: "v.sourceFileName", confirmedAt: formatTableDateExpression("v.confirmedAt"), createdAt: formatTableDateExpression("v.createdAt"), updatedAt: formatTableDateExpression("v.updatedAt"),
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(whereParts, params, expression, field, searchParams, "capexVersion");
   const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
   const pageSize = Math.min(100, Math.max(1, toNumber(searchParams.get("pageSize"), 20)));
   const requestedPage = Math.max(1, toNumber(searchParams.get("page"), 1));
@@ -432,12 +437,19 @@ export async function listCapexPricingVersions(searchParams: URLSearchParams) {
       LEFT JOIN capexpricingitems i ON i.versionId = v.versionId
       ${where}
       GROUP BY v.versionId
-      ORDER BY v.effectiveDate DESC, v.createdAt DESC
+      ${getTableSort(searchParams, filterExpressions) || "ORDER BY v.effectiveDate DESC, v.createdAt DESC"}
       LIMIT :limit OFFSET :offset
     `,
     { ...params, limit: pageSize, offset: (page - 1) * pageSize },
   );
   return { rows, total, page, pageSize, totalPages };
+}
+
+export async function listCapexPricingVersionFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    versionNo: "versionNo", countryCode: "countryCode", effectiveDate: formatTableDateExpression("effectiveDate"), status: "status", itemCount: "(SELECT COUNT(*) FROM capexpricingitems iFilterCount WHERE iFilterCount.versionId = capexpricingversions.versionId)", sourceFileName: "sourceFileName", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  return listSqlFilterOptions({ from: "capexpricingversions", expressions, searchParams });
 }
 
 export async function createCapexPricingVersion(input: CapexPricingVersionInput) {

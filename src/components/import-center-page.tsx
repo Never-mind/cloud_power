@@ -5,6 +5,7 @@ import { AlertTriangle, CheckCircle2, Download, FileSpreadsheet, RefreshCw, Uplo
 import { formatDisplayValue } from "@/lib/display-format";
 import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
 import { Button, Panel } from "./ui";
 
 type ImportTarget = {
@@ -230,7 +231,7 @@ export function ImportCenterPage() {
             </div>
 
             <div className="grid gap-4 p-4 lg:grid-cols-[1fr_320px]">
-              <div className="overflow-auto">
+              <StickyTable className="overflow-auto" tableKey="import-center-columns">
                 <table className="min-w-full border-collapse text-sm">
                   <thead className="bg-[#f5f7fa]">
                     <tr>
@@ -251,7 +252,7 @@ export function ImportCenterPage() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </StickyTable>
 
               <div className="border border-[#ebeef5] bg-[#fafafa] p-4">
                 <div className="mb-3 flex items-center gap-2 font-medium text-[#303133]">
@@ -296,7 +297,7 @@ export function ImportCenterPage() {
 
           <Panel>
             <div className="border-b border-[#ebeef5] px-4 py-3 font-medium text-[#303133]">导入历史</div>
-            <div className="overflow-auto">
+            <StickyTable className="overflow-auto" tableKey="import-center-history">
               <table className="min-w-full border-collapse text-sm">
                 <thead className="bg-[#f5f7fa]">
                   <tr>
@@ -333,7 +334,7 @@ export function ImportCenterPage() {
                   ) : null}
                 </tbody>
               </table>
-            </div>
+            </StickyTable>
             <PaginationBar
               page={jobPage}
               pageSize={jobPageSize}

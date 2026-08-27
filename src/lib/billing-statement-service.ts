@@ -10,6 +10,7 @@ import {
 } from "./db";
 import { firstDayOfMonth } from "./billing-workflow";
 import { DEFAULT_PAGE_SIZE, normalizePageSize } from "./pagination";
+import { appendTableFilterOptionConditions, appendTableInFilter, formatTableDateExpression, getTableFilterOptionsOrderBy, getTableSort } from "./table-query";
 import {
   buildBillingStatementRows,
   getVatRate,
@@ -49,6 +50,11 @@ export async function listBillingStatementSnapshots(searchParams: URLSearchParam
   const pageSize = normalizePageSize(Number(searchParams.get("pageSize") ?? DEFAULT_PAGE_SIZE));
   const whereParts: string[] = [];
   const params: Row = {};
+  const filterExpressions: Record<string, string> = {
+    snapshotNo: "snapshotNo", status: "status", countryCode: "countryCode", startDate: formatTableDateExpression("startDate"), endDate: formatTableDateExpression("endDate"),
+    currencySummary: "currencySummary", totalQuantity: "totalQuantity", totalAmount: "totalAmount", itemCount: "itemCount", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  for (const [field, expression] of Object.entries(filterExpressions)) appendTableInFilter(whereParts, params, expression, field, searchParams, "billingStatement");
 
   if (keyword) {
     whereParts.push("(snapshotNo LIKE :keyword OR countryCode LIKE :keyword OR currencySummary LIKE :keyword)");
@@ -92,13 +98,30 @@ export async function listBillingStatementSnapshots(searchParams: URLSearchParam
         DATE_FORMAT(updatedAt, '%Y-%m-%d') AS updatedAt
       FROM billingstatementsnapshots
       ${where}
-      ORDER BY createdAt DESC
+      ${getTableSort(searchParams, filterExpressions) || "ORDER BY createdAt DESC"}
       ${exportAll ? "" : "LIMIT :limit OFFSET :offset"}
     `,
     params,
   );
 
   return { rows, total: normalizedTotal, page, pageSize, totalPages };
+}
+
+export async function listBillingStatementFilterOptions(searchParams: URLSearchParams) {
+  const expressions: Record<string, string> = {
+    snapshotNo: "snapshotNo", status: "status", countryCode: "countryCode", startDate: formatTableDateExpression("startDate"), endDate: formatTableDateExpression("endDate"),
+    currencySummary: "currencySummary", totalQuantity: "totalQuantity", totalAmount: "totalAmount", itemCount: "itemCount", confirmedAt: formatTableDateExpression("confirmedAt"), createdAt: formatTableDateExpression("createdAt"), updatedAt: formatTableDateExpression("updatedAt"),
+  };
+  const field = searchParams.get("field")?.trim() ?? "";
+  const expression = expressions[field];
+  if (!expression) return { options: [] as Array<{ value: string; count: number }> };
+  const params: Row = {};
+  const where = [`${expression} IS NOT NULL`, `TRIM(CAST(${expression} AS CHAR)) <> ''`];
+  const keyword = searchParams.get("keyword")?.trim() ?? "";
+  if (keyword) { where.push(`${expression} LIKE :optionKeyword`); params.optionKeyword = `%${keyword}%`; }
+  appendTableFilterOptionConditions(where, params, expressions, searchParams, field);
+  const rows = await queryRows<{ value: string; count: number }>(`SELECT ${expression} AS value, COUNT(*) AS count FROM billingstatementsnapshots WHERE ${where.join(" AND ")} GROUP BY ${expression} ORDER BY ${getTableFilterOptionsOrderBy(field, expression)} LIMIT 500`, params);
+  return { options: rows.map((row) => ({ value: String(row.value ?? ""), count: Number(row.count ?? 0) })) };
 }
 
 export async function previewBillingStatement(filters: BillingStatementFilters) {

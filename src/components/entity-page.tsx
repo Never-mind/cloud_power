@@ -19,6 +19,9 @@ import {
   type ColumnVisibility,
 } from "@/lib/table-utils";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableFilterOption, type TableSortOrder } from "./table-column-menu";
+import { useRequestGuard } from "@/lib/table-query-client";
 import { Button, Input, Panel, Textarea } from "./ui";
 
 type Row = Record<string, string | number | boolean | null>;
@@ -66,6 +69,14 @@ export function EntityPage({
   );
   const [page, setPage] = useState(() => getPositiveNumber(searchParams.get("page"), 1));
   const [pageSize, setPageSize] = useState(() => getPositiveNumber(searchParams.get("pageSize"), DEFAULT_PAGE_SIZE));
+  const [sortField, setSortField] = useState(() => searchParams.get("sortField") ?? "");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>(() => {
+    const value = searchParams.get("sortOrder");
+    return value === "asc" || value === "desc" ? value : "";
+  });
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>(() =>
+    Object.fromEntries(config.listFields.map((field) => [field.key, searchParams.getAll(`filter.${field.key}`)])),
+  );
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<Row | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -82,6 +93,7 @@ export function EntityPage({
   );
   const fileRef = useRef<HTMLInputElement>(null);
   const currentRoute = getCurrentRoute(pathname, searchParams.toString());
+  const beginRequest = useRequestGuard();
 
   useListScrollPosition(`${config.key}:${currentRoute}`, !loading);
 
@@ -89,6 +101,13 @@ export function EntityPage({
     const params = new URLSearchParams(searchParams.toString());
     params.set("page", String(page));
     params.set("pageSize", String(pageSize));
+    if (sortField && sortOrder) {
+      params.set("sortField", sortField);
+      params.set("sortOrder", sortOrder);
+    } else {
+      params.delete("sortField");
+      params.delete("sortOrder");
+    }
     if (appliedKeyword.trim()) params.set("keyword", appliedKeyword);
     else params.delete("keyword");
     for (const filter of config.filters) {
@@ -97,9 +116,13 @@ export function EntityPage({
       if (value) params.set(filter.key, value);
       else params.delete(filter.key);
     }
+    for (const [key, values] of Object.entries(columnFilters)) {
+      params.delete(`filter.${key}`);
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
     const nextRoute = buildListRoute(pathname, params);
     if (nextRoute !== currentRoute) router.replace(nextRoute, { scroll: false });
-  }, [appliedFilterValues, appliedKeyword, config.filters, currentRoute, page, pageSize, pathname, router, searchParams]);
+  }, [appliedFilterValues, appliedKeyword, columnFilters, config.filters, currentRoute, page, pageSize, pathname, router, searchParams, sortField, sortOrder]);
   const visibleColumns = useMemo(
     () => getVisibleColumns(config.listFields, visibility),
     [config.listFields, visibility],
@@ -124,6 +147,7 @@ export function EntityPage({
   }, [appliedFilterValues, appliedKeyword, fixedFilters]);
 
   async function loadRows(next?: { page?: number; pageSize?: number; keyword?: string; filterValues?: Record<string, string> }) {
+    const isCurrentRequest = beginRequest();
     setLoading(true);
     const nextPage = next?.page ?? page;
     const nextPageSize = next?.pageSize ?? pageSize;
@@ -140,26 +164,62 @@ export function EntityPage({
     for (const [key, value] of Object.entries(fixedFilters)) {
       if (value.trim()) params.set(key, value.trim());
     }
+    for (const [key, values] of Object.entries(columnFilters)) {
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
+    if (sortField && sortOrder) {
+      params.set("sortField", sortField);
+      params.set("sortOrder", sortOrder);
+    }
     try {
       const response = await fetch(`/api/entities/${config.key}?${params.toString()}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "数据加载失败");
+      if (!isCurrentRequest()) return;
       setRows(data.rows ?? []);
       setTotal(Number(data.total ?? 0));
       if (Number(data.page ?? nextPage) !== nextPage) setPage(Number(data.page));
       if (Number(data.pageSize ?? nextPageSize) !== nextPageSize) setPageSize(Number(data.pageSize));
     } catch (error) {
+      if (!isCurrentRequest()) return;
       setRows([]);
       setTotal(0);
       alert(error instanceof Error ? error.message : "数据加载失败");
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
   }
 
   useEffect(() => {
     void loadRows();
-  }, [config.key, fixedFilters, page, pageSize]);
+  }, [columnFilters, config.key, fixedFilters, page, pageSize, sortField, sortOrder]);
+
+  async function loadColumnOptions(columnKey: string, optionKeyword: string): Promise<TableFilterOption[]> {
+    const params = new URLSearchParams({ field: columnKey });
+    if (optionKeyword.trim()) params.set("keyword", optionKeyword.trim());
+    for (const [key, value] of Object.entries(appliedFilterValues)) {
+      if (value.trim()) params.set(key, value.trim());
+    }
+    for (const [key, values] of Object.entries(columnFilters)) {
+      if (key === columnKey) continue;
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
+    const response = await fetch(`/api/entities/${config.key}/filter-options?${params.toString()}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "筛选候选值加载失败");
+    return (data.options ?? []) as TableFilterOption[];
+  }
+
+  function applyColumnSort(field: string, order: TableSortOrder) {
+    setSortField(field);
+    setSortOrder(order);
+    setPage(1);
+  }
+
+  function applyColumnFilter(field: string, values: string[]) {
+    setColumnFilters((current) => ({ ...current, [field]: values }));
+    setPage(1);
+  }
 
   useEffect(() => {
     if (config.key !== "instance-contracts") return;
@@ -475,7 +535,7 @@ export function EntityPage({
           </div>
         ) : null}
 
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey={config.key}>
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -484,7 +544,14 @@ export function EntityPage({
                 ) : null}
                 {visibleColumns.map((column) => (
                   <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>
-                    {column.label}
+                    <TableColumnMenu
+                      column={column}
+                      filterValues={columnFilters[column.key] ?? []}
+                      loadOptions={(optionKeyword) => loadColumnOptions(column.key, optionKeyword)}
+                      onFilter={(values) => applyColumnFilter(column.key, values)}
+                      onSort={(order) => applyColumnSort(column.key, order)}
+                      sortOrder={sortField === column.key ? sortOrder : ""}
+                    />
                   </th>
                 ))}
                 {!readOnly ? (
@@ -540,7 +607,7 @@ export function EntityPage({
               )}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
 
         <PaginationBar
           page={page}

@@ -22,6 +22,7 @@ export function getOrderListColumnKeys(mode: OrderRouteMode) {
   return [
     "poNo",
     "requestNo",
+    "countryCode",
     "batchName",
     "status",
     "currency",

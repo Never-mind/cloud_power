@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { listInternalServiceFees, syncInternalServiceLedgers } from "@/lib/internal-service-fee-service";
+import { listInternalServiceFeeFilterOptions, listInternalServiceFees, syncInternalServiceLedgers } from "@/lib/internal-service-fee-service";
 
 export async function GET(request: NextRequest) {
   try {
+    if (request.nextUrl.searchParams.get("field")) {
+      return NextResponse.json(await listInternalServiceFeeFilterOptions(request.nextUrl.searchParams));
+    }
     return NextResponse.json(await listInternalServiceFees(request.nextUrl.searchParams));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "内部服务费加载失败" }, { status: 500 });

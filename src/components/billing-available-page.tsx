@@ -6,7 +6,10 @@ import { useRouter } from "next/navigation";
 import { formatDisplayValue } from "@/lib/display-format";
 import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
 import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
+import { fetchTableFilterOptions } from "@/lib/table-query-client";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableSortOrder } from "./table-column-menu";
 import { Button, Input, Panel } from "./ui";
 
 type Row = {
@@ -96,6 +99,9 @@ export function BillingAvailablePage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [total, setTotal] = useState(0);
   const pageSizeRef = useRef(pageSize);
+  const [sortField, setSortField] = useState("");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>("");
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
 
   async function loadData(
     nextPage = page,
@@ -103,12 +109,20 @@ export function BillingAvailablePage() {
     nextKeyword = appliedKeyword,
     nextCountryCode = appliedCountryCode,
     nextRequestType = appliedRequestType,
+    queryState = { sortField, sortOrder, columnFilters },
   ) {
     setLoading(true);
     const params = new URLSearchParams({ page: String(nextPage), pageSize: String(nextPageSize) });
     if (nextKeyword.trim()) params.set("keyword", nextKeyword.trim());
     if (nextCountryCode.trim()) params.set("countryCode", nextCountryCode.trim());
     if (nextRequestType.trim()) params.set("requestType", nextRequestType.trim());
+    if (queryState.sortField && queryState.sortOrder) {
+      params.set("sortField", queryState.sortField);
+      params.set("sortOrder", queryState.sortOrder);
+    }
+    for (const [field, values] of Object.entries(queryState.columnFilters)) {
+      for (const value of values) params.append(`filter.${field}`, value);
+    }
     const [response, contractRows] = await Promise.all([
       fetch(`/api/billing/available?${params}`),
       fetchAllEntityRows<InstanceContract>("instance-contracts"),
@@ -124,6 +138,19 @@ export function BillingAvailablePage() {
       return next;
     });
     setLoading(false);
+  }
+
+  function refreshTableQuery(next: { sortField?: string; sortOrder?: TableSortOrder; columnFilters?: Record<string, string[]> }) {
+    const queryState = {
+      sortField: next.sortField ?? sortField,
+      sortOrder: next.sortOrder ?? sortOrder,
+      columnFilters: next.columnFilters ?? columnFilters,
+    };
+    setSortField(queryState.sortField);
+    setSortOrder(queryState.sortOrder);
+    setColumnFilters(queryState.columnFilters);
+    setPage(1);
+    void loadData(1, pageSizeRef.current, appliedKeyword, appliedCountryCode, appliedRequestType, queryState);
   }
 
   useEffect(() => {
@@ -262,7 +289,7 @@ export function BillingAvailablePage() {
             刷新
           </Button>
         </div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="billing-available">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -271,7 +298,14 @@ export function BillingAvailablePage() {
                 </th>
                 {columns.map((column) => (
                   <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>
-                    {column.label}
+                    <TableColumnMenu
+                      column={{ key: column.key, label: column.label, type: column.type, sortable: true, filterable: true }}
+                      sortOrder={sortField === column.key ? sortOrder : ""}
+                      filterValues={columnFilters[column.key] ?? []}
+                      loadOptions={(keyword) => fetchTableFilterOptions("/api/billing/available", column.key, keyword, {}, columnFilters)}
+                      onSort={(order) => refreshTableQuery({ sortField: order ? column.key : "", sortOrder: order })}
+                      onFilter={(values) => refreshTableQuery({ columnFilters: { ...columnFilters, [column.key]: values } })}
+                    />
                   </th>
                 ))}
                 <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">起始核销月份</th>
@@ -332,7 +366,7 @@ export function BillingAvailablePage() {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={(next) => { setPage(next); void loadData(next, pageSizeRef.current); }} onPageSizeChange={(next) => { pageSizeRef.current = next; setPageSize(next); setPage(1); void loadData(1, next); }} />
       </Panel>
       {selectedIds.length ? (

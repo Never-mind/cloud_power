@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   createBillingStatementSnapshot,
+  listBillingStatementFilterOptions,
   listBillingStatementSnapshots,
   previewBillingStatement,
 } from "@/lib/billing-statement-service";
 
 export async function GET(request: NextRequest) {
+  if (request.nextUrl.searchParams.get("field")) {
+    return NextResponse.json(await listBillingStatementFilterOptions(request.nextUrl.searchParams));
+  }
   const mode = request.nextUrl.searchParams.get("mode");
   if (mode === "preview") {
     try {

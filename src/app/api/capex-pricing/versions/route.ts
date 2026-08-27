@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createCapexPricingVersion, listCapexPricingVersions } from "@/lib/capex-pricing-service";
+import { createCapexPricingVersion, listCapexPricingVersionFilterOptions, listCapexPricingVersions } from "@/lib/capex-pricing-service";
 
 export async function GET(request: NextRequest) {
   try {
+    if (request.nextUrl.searchParams.has("field")) return NextResponse.json(await listCapexPricingVersionFilterOptions(request.nextUrl.searchParams));
     return NextResponse.json(await listCapexPricingVersions(request.nextUrl.searchParams));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "价格版本加载失败" }, { status: 500 });

@@ -11,6 +11,7 @@ import { REQUEST_TYPE_OPTIONS } from "@/lib/request-type";
 import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
 import { buildDetailRoute, getReturnTo } from "@/lib/client-list-navigation";
 import { Button, Input, Panel } from "./ui";
+import { StickyTable } from "./sticky-table";
 
 type Row = Record<string, string | number | boolean | null>;
 
@@ -344,7 +345,7 @@ export function RequestOrderFormPage({ requestNo }: { requestNo?: string }) {
           />
         </div>
 
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="request-order-form-details">
           <table className="min-w-[1220px] whitespace-nowrap border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
@@ -425,7 +426,7 @@ export function RequestOrderFormPage({ requestNo }: { requestNo?: string }) {
               </option>
             ))}
           </datalist>
-        </div>
+        </StickyTable>
       </Panel>
     </div>
   );

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createFinalBalanceSettlement, listFinalBalanceSettlements } from "@/lib/balance-final-settlement-service";
+import { createFinalBalanceSettlement, listFinalBalanceSettlementFilterOptions, listFinalBalanceSettlements } from "@/lib/balance-final-settlement-service";
 
 export async function GET(request: NextRequest) {
   try {
+    if (request.nextUrl.searchParams.has("field")) return NextResponse.json(await listFinalBalanceSettlementFilterOptions(request.nextUrl.searchParams));
     return NextResponse.json({
       ...await listFinalBalanceSettlements({
         countryCode: request.nextUrl.searchParams.get("countryCode") ?? "",
@@ -11,6 +12,7 @@ export async function GET(request: NextRequest) {
         keyword: request.nextUrl.searchParams.get("keyword") ?? "",
         page: Number(request.nextUrl.searchParams.get("page") ?? 1),
         pageSize: Number(request.nextUrl.searchParams.get("pageSize") ?? 20),
+        searchParams: request.nextUrl.searchParams,
       }),
     });
   } catch (error) {

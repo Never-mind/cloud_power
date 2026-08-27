@@ -7,6 +7,8 @@ import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
 import { postWorkspaceMessage } from "@/lib/tab-workspace";
 import { Button, Input, Panel } from "./ui";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableFilterOption, type TableSortOrder } from "./table-column-menu";
 import { WorkspaceNavigationDialog } from "./workspace-navigation-dialog";
 
 type Row = Record<string, string | number | boolean | null>;
@@ -37,6 +39,7 @@ const previewColumns: Array<{ key: string; label: string; type?: string }> = [
   { key: "amount", label: "金额", type: "number" },
   { key: "currency", label: "币种" },
 ];
+const tableColumns = snapshotColumns.map((column) => ({ ...column, sortable: true, filterable: true }));
 
 export function BillingStatementsPage() {
   const [snapshots, setSnapshots] = useState<Row[]>([]);
@@ -54,6 +57,9 @@ export function BillingStatementsPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [total, setTotal] = useState(0);
   const [navigationPrompt, setNavigationPrompt] = useState<{ route: string; detail: string } | null>(null);
+  const [sortField, setSortField] = useState("");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>("");
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
   const pageSizeRef = useRef(pageSize);
   const skipNextPageChangeRef = useRef(false);
 
@@ -62,6 +68,8 @@ export function BillingStatementsPage() {
     const params = new URLSearchParams();
     if (keyword.trim()) params.set("keyword", keyword.trim());
     if (status) params.set("status", status);
+    if (sortField && sortOrder) { params.set("sortField", sortField); params.set("sortOrder", sortOrder); }
+    for (const [key, values] of Object.entries(columnFilters)) values.forEach((value) => params.append(`filter.${key}`, value));
     params.set("page", String(nextPage));
     params.set("pageSize", String(nextPageSize));
     try {
@@ -137,6 +145,28 @@ export function BillingStatementsPage() {
   useEffect(() => {
     void loadSnapshots();
   }, []);
+
+  useEffect(() => {
+    if (!Object.keys(columnFilters).length && !sortField && !sortOrder) return;
+    void loadSnapshots(1);
+  }, [columnFilters, sortField, sortOrder]);
+
+  async function loadColumnOptions(field: string, optionKeyword: string): Promise<TableFilterOption[]> {
+    const params = new URLSearchParams({ field });
+    if (optionKeyword.trim()) params.set("keyword", optionKeyword.trim());
+    for (const [key, values] of Object.entries(columnFilters)) {
+      if (key === field) continue;
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
+    const response = await fetch(`/api/billing-statements?${params}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "筛选候选值加载失败");
+    return (data.options ?? []) as TableFilterOption[];
+  }
+
+  function renderHeader(column: (typeof tableColumns)[number]) {
+    return <TableColumnMenu column={column} filterValues={columnFilters[column.key] ?? []} loadOptions={(keyword) => loadColumnOptions(column.key, keyword)} onFilter={(values) => { setColumnFilters((current) => ({ ...current, [column.key]: values })); setPage(1); }} onSort={(order) => { setSortField(order ? column.key : ""); setSortOrder(order); setPage(1); }} sortOrder={sortField === column.key ? sortOrder : ""} />;
+  }
 
   const previewSummary = useMemo(
     () =>
@@ -254,13 +284,13 @@ export function BillingStatementsPage() {
             刷新
           </Button>
         </div>
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey="billing-statements">
           <table className="min-w-full border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
-                {snapshotColumns.map((column) => (
+                {tableColumns.map((column) => (
                   <th className="whitespace-nowrap border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium" key={column.key}>
-                    {column.label}
+                    {renderHeader(column)}
                   </th>
                 ))}
                 <th className="sticky right-0 border-b border-[#ebeef5] bg-[#f5f7fa] px-3 py-3 text-left font-medium">操作</th>
@@ -311,7 +341,7 @@ export function BillingStatementsPage() {
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar
           page={page}
           pageSize={pageSize}

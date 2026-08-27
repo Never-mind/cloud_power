@@ -18,6 +18,9 @@ import { DEFAULT_PAGE_SIZE } from "@/lib/pagination";
 import { buildDetailRoute, buildListRoute, getCurrentRoute, getPositiveNumber, useListScrollPosition } from "@/lib/client-list-navigation";
 import { fetchAllEntityRows } from "@/lib/client-entity-fetch";
 import { PaginationBar } from "./pagination-bar";
+import { StickyTable } from "./sticky-table";
+import { TableColumnMenu, type TableFilterOption, type TableSortOrder } from "./table-column-menu";
+import { useRequestGuard } from "@/lib/table-query-client";
 import { Button, Input, Panel } from "./ui";
 
 type Row = Record<string, string | number | boolean | null>;
@@ -60,10 +63,24 @@ export function OrderListPage({
   const [deletingId, setDeletingId] = useState("");
   const [page, setPage] = useState(() => getPositiveNumber(searchParams.get("page"), 1));
   const [pageSize, setPageSize] = useState(() => getPositiveNumber(searchParams.get("pageSize"), DEFAULT_PAGE_SIZE));
+  const [sortField, setSortField] = useState(() => searchParams.get("sortField") ?? "");
+  const [sortOrder, setSortOrder] = useState<TableSortOrder>(() => {
+    const value = searchParams.get("sortOrder");
+    return value === "asc" || value === "desc" ? value : "";
+  });
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>(() => ({
+    requestNo: searchParams.getAll("filter.requestNo"),
+    countryCode: searchParams.getAll("filter.countryCode"),
+    batchName: searchParams.getAll("filter.batchName"),
+    status: searchParams.getAll("filter.status"),
+    requestType: searchParams.getAll("filter.requestType"),
+    currency: searchParams.getAll("filter.currency"),
+  }));
   const pageSizeRef = useRef(pageSize);
   const skipNextPageChangeRef = useRef(false);
   const columnKeys = getOrderListColumnKeys(mode);
   const currentRoute = getCurrentRoute(pathname, searchParams.toString());
+  const beginRequest = useRequestGuard();
 
   useListScrollPosition(currentRoute, !loading);
 
@@ -72,14 +89,25 @@ export function OrderListPage({
     params.set("page", String(page));
     params.set("pageSize", String(pageSize));
     params.set("statusTab", statusTab);
+    if (sortField && sortOrder) {
+      params.set("sortField", sortField);
+      params.set("sortOrder", sortOrder);
+    } else {
+      params.delete("sortField");
+      params.delete("sortOrder");
+    }
     if (appliedKeyword.trim()) params.set("keyword", appliedKeyword);
     else params.delete("keyword");
     if (appliedCountryCode.trim()) params.set("countryCode", appliedCountryCode);
     else params.delete("countryCode");
+    for (const [key, values] of Object.entries(columnFilters)) {
+      params.delete(`filter.${key}`);
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
 
     const nextRoute = buildListRoute(pathname, params);
     if (nextRoute !== currentRoute) router.replace(nextRoute, { scroll: false });
-  }, [appliedCountryCode, appliedKeyword, currentRoute, page, pageSize, pathname, router, searchParams, statusTab]);
+  }, [appliedCountryCode, appliedKeyword, columnFilters, currentRoute, page, pageSize, pathname, router, searchParams, sortField, sortOrder, statusTab]);
 
   useEffect(() => {
     let active = true;
@@ -115,6 +143,13 @@ export function OrderListPage({
     });
     if (nextKeyword.trim()) params.set("keyword", nextKeyword.trim());
     if (nextCountryCode.trim()) params.set("countryCode", nextCountryCode.trim());
+    for (const [key, values] of Object.entries(columnFilters)) {
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
+    if (sortField && sortOrder) {
+      params.set("sortField", sortField);
+      params.set("sortOrder", sortOrder);
+    }
     if (exportAll) params.set("export", "1");
     const response = await fetch(`/api/orders?${params.toString()}`);
     const data = await response.json();
@@ -122,27 +157,58 @@ export function OrderListPage({
     return data as OrderListResponse;
   }
 
+  async function loadColumnOptions(field: string, optionKeyword: string): Promise<TableFilterOption[]> {
+    const params = new URLSearchParams({ mode, field });
+    if (optionKeyword.trim()) params.set("keyword", optionKeyword.trim());
+    params.set("statusTab", statusTab);
+    if (appliedCountryCode.trim()) params.set("countryCode", appliedCountryCode.trim());
+    for (const [key, values] of Object.entries(columnFilters)) {
+      if (key === field) continue;
+      for (const value of values) params.append(`filter.${key}`, value);
+    }
+    const response = await fetch(`/api/orders?${params.toString()}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? "筛选候选值加载失败");
+    return (data.options ?? []) as TableFilterOption[];
+  }
+
+  function renderHeader(field: string, label: string) {
+    return (
+      <TableColumnMenu
+        column={{ key: field, label }}
+        filterValues={columnFilters[field] ?? []}
+        loadOptions={(optionKeyword) => loadColumnOptions(field, optionKeyword)}
+        onFilter={(values) => { setColumnFilters((current) => ({ ...current, [field]: values })); setPage(1); }}
+        onSort={(order) => { setSortField(order ? field : ""); setSortOrder(order); setPage(1); }}
+        sortOrder={sortField === field ? sortOrder : ""}
+      />
+    );
+  }
+
   async function loadData(nextPage = page, nextPageSize = pageSizeRef.current, nextStatusTab = statusTab, nextKeyword = appliedKeyword, nextCountryCode = appliedCountryCode) {
+    const isCurrentRequest = beginRequest();
     setLoading(true);
     try {
       const data = await fetchData(nextPage, nextPageSize, nextStatusTab, nextKeyword, nextCountryCode);
+      if (!isCurrentRequest()) return;
       setRows(data.rows ?? []);
       setTotal(Number(data.total ?? 0));
       setStatusCounts(data.statusCounts ?? { draft: 0, confirmed: 0 });
       if (data.page !== nextPage) setPage(data.page);
     } catch (error) {
+      if (!isCurrentRequest()) return;
       setRows([]);
       setTotal(0);
       setStatusCounts({ draft: 0, confirmed: 0 });
       alert(error instanceof Error ? error.message : "订单列表加载失败");
     } finally {
-      setLoading(false);
+      if (isCurrentRequest()) setLoading(false);
     }
   }
 
   useEffect(() => {
     void loadData(page, pageSize, statusTab, appliedKeyword, appliedCountryCode);
-  }, [mode]);
+  }, [appliedCountryCode, appliedKeyword, columnFilters, mode, page, pageSize, sortField, sortOrder, statusTab]);
 
   async function confirmRequestOrder(requestNo: string) {
     setConfirmingId(requestNo);
@@ -202,7 +268,7 @@ export function OrderListPage({
             ["createdAt", "创建日期", "datetime"], ["updatedAt", "更新日期", "datetime"],
           ]
         : [
-            ["poNo", "PO订单号"], ["requestNo", "来源需求单"], ["batchName", "批次号"], ["status", "状态"],
+            ["poNo", "PO订单号"], ["requestNo", "来源需求单"], ["countryCode", "国家"], ["batchName", "批次号"], ["status", "状态"],
             ["currency", "币种"], ["totalQuantity", "总数量"], ["purchaseTotalAmount", "采购总金额", "money"],
             ["createdAt", "创建日期", "datetime"], ["updatedAt", "更新日期", "datetime"],
           ];
@@ -303,48 +369,53 @@ export function OrderListPage({
           {shouldShowPurchaseSourceGenerator(mode) ? <div className="ml-auto" /> : null}
         </div>
 
-        <div className="table-scroll overflow-auto">
+        <StickyTable className="table-scroll overflow-auto" tableKey={`orders-${mode}`}>
           <table className="w-full min-w-[1180px] border-collapse text-sm">
             <thead className="bg-[#f5f7fa] text-[#303133]">
               <tr>
                 <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">
-                  {mode === "requests" ? "需求单号" : "PO订单号"}
+                  {renderHeader(mode === "requests" ? "requestNo" : "poNo", mode === "requests" ? "需求单号" : "PO订单号")}
                 </th>
                 {mode === "requests" ? (
                   <>
-                    <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">国家</th>
-                    <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">批次号</th>
+                    <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">{renderHeader("countryCode", "国家")}</th>
+                    <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">{renderHeader("batchName", "批次号")}</th>
                   </>
                 ) : null}
                 {mode === "purchase" ? (
                   <th className="w-[260px] min-w-[260px] border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">
-                    来源需求单
+                    {renderHeader("requestNo", "来源需求单")}
                   </th>
                 ) : null}
                 {mode === "purchase" ? (
                   <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">
-                    批次号
+                    {renderHeader("countryCode", "国家")}
                   </th>
                 ) : null}
-                <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">状态</th>
+                {mode === "purchase" ? (
+                  <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">
+                    {renderHeader("batchName", "批次号")}
+                  </th>
+                ) : null}
+                <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">{renderHeader("status", "状态")}</th>
                 {mode === "purchase" ? (
                   <>
-                    <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">币种</th>
+                        <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">{renderHeader("currency", "币种")}</th>
                   </>
                 ) : null}
-                <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">总数量</th>
+                <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">{renderHeader("totalQuantity", "总数量")}</th>
                 {mode === "purchase" ? (
                   <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">
-                    采购总金额
+                    {renderHeader("purchaseTotalAmount", "采购总金额")}
                   </th>
                 ) : null}
                 {mode === "requests" ? (
                   <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">
-                    计划交付日期
+                    {renderHeader("plannedDeliveryDate", "计划交付日期")}
                   </th>
                 ) : null}
-                <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">创建时间</th>
-                <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">更新时间</th>
+                <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">{renderHeader("createdAt", "创建时间")}</th>
+                <th className="border-b border-r border-[#ebeef5] px-3 py-3 text-left font-medium">{renderHeader("updatedAt", "更新时间")}</th>
                 {hasActionColumn ? (
                   <th className="sticky right-0 border-b border-[#ebeef5] bg-[#f5f7fa] px-3 py-3 text-left font-medium">
                     操作
@@ -380,6 +451,11 @@ export function OrderListPage({
                     {mode === "purchase" ? (
                       <td className="w-[260px] max-w-[260px] border-b border-r border-[#ebeef5] px-3 py-3">
                         <span className="block truncate" title={String(row.requestNo ?? "")}>{formatValue(row.requestNo)}</span>
+                      </td>
+                    ) : null}
+                    {mode === "purchase" ? (
+                      <td className="border-b border-r border-[#ebeef5] px-3 py-3">
+                        {formatValue(row.countryCode)}
                       </td>
                     ) : null}
                     {mode === "purchase" ? (
@@ -469,7 +545,7 @@ export function OrderListPage({
               ) : null}
             </tbody>
           </table>
-        </div>
+        </StickyTable>
         <PaginationBar
           page={page}
           pageSize={pageSize}
